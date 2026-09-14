@@ -19,8 +19,11 @@ package gateway
 
 import (
 	config "ai-api-gateway-service/gateway_config"
+	"ai-api-gateway-service/middleware"
 	"ai-api-gateway-service/pool"
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,6 +40,10 @@ import (
 
 const NVCFPollSeconds string = "NVCF-POLL-SECONDS"
 const defaultNVCFPollSeconds config.SessionTimeoutSeconds = 300
+
+// 499 (nginx's non-standard "client closed request"). Telemetry-only: the
+// disconnected client can't receive it; it distinguishes a disconnect from a 502.
+const statusClientClosedRequest = 499
 
 // writeFunctionStatusError writes a 503 or 410 response if the function is offline or expired.
 // name is used in the EOL detail message; pass empty string for vanity/path-based endpoints.
@@ -74,8 +81,49 @@ func writeFunctionStatusError(writer http.ResponseWriter, offlineMessage string,
 	return false
 }
 
-func writeBadGatewayProblem(writer http.ResponseWriter, _ *http.Request, err error) {
-	zap.L().Warn("proxy request failed", zap.Error(err))
+// clientClosedRequest is true only when the inbound request context is canceled
+// (the authoritative disconnect signal); a transport error wrapping
+// context.Canceled with a live context stays a genuine upstream fault (502).
+func clientClosedRequest(request *http.Request) bool {
+	return request != nil && errors.Is(request.Context().Err(), context.Canceled)
+}
+
+func addGatewayProxyOutcome(request *http.Request, outcome middleware.GatewayProxyOutcome) {
+	if request == nil {
+		return
+	}
+	middleware.AddGatewayProxyOutcomeMetricAttribute(request.Context(), outcome)
+	trace.SpanFromContext(request.Context()).SetAttributes(traceAttrGatewayProxyOutcome.String(string(outcome)))
+}
+
+// writeProxyError maps a canceled inbound request to 499; all other ReverseProxy
+// ErrorHandler failures remain 502.
+func writeProxyError(writer http.ResponseWriter, request *http.Request, err error) {
+	if clientClosedRequest(request) {
+		addGatewayProxyOutcome(request, middleware.GatewayProxyOutcomeClientCanceled)
+		zap.L().Debug("proxy request canceled",
+			zap.String(string(middleware.GatewayProxyOutcomeMetricAttribute), string(middleware.GatewayProxyOutcomeClientCanceled)),
+			zap.Error(err),
+		)
+		writer.Header().Set("Content-Type", "application/problem+json")
+		writer.WriteHeader(statusClientClosedRequest)
+		_ = json.NewEncoder(writer).Encode(ProblemDetails{
+			Type:   "about:blank",
+			Title:  "Client Closed Request",
+			Status: statusClientClosedRequest,
+			Detail: "Client closed the request before a response was produced.",
+		})
+		return
+	}
+	writeBadGatewayProblem(writer, request, err)
+}
+
+func writeBadGatewayProblem(writer http.ResponseWriter, request *http.Request, err error) {
+	addGatewayProxyOutcome(request, middleware.GatewayProxyOutcomeProxyError)
+	zap.L().Warn("proxy request failed",
+		zap.String(string(middleware.GatewayProxyOutcomeMetricAttribute), string(middleware.GatewayProxyOutcomeProxyError)),
+		zap.Error(err),
+	)
 	writer.Header().Set("Content-Type", "application/problem+json")
 	writer.WriteHeader(http.StatusBadGateway)
 	_ = json.NewEncoder(writer).Encode(ProblemDetails{
@@ -119,8 +167,8 @@ type ProblemDetails struct {
 	Detail string `json:"detail"`
 }
 
-func NewVanityDirector(nvcfApiHost string, transport http.RoundTripper) (*VanityDirector, error) {
-	rp := &httputil.ReverseProxy{
+func newGatewayReverseProxy(transport http.RoundTripper) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
 		Director: func(request *http.Request) {
 			// already directed, needed to be able to error
 		},
@@ -128,8 +176,12 @@ func NewVanityDirector(nvcfApiHost string, transport http.RoundTripper) (*Vanity
 		BufferPool:     pool.ByteSlice,
 		Transport:      transport,
 		ModifyResponse: modifyTooManyRequestsResponse,
-		ErrorHandler:   writeBadGatewayProblem,
+		ErrorHandler:   writeProxyError,
 	}
+}
+
+func NewVanityDirector(nvcfApiHost string, transport http.RoundTripper) (*VanityDirector, error) {
+	rp := newGatewayReverseProxy(transport)
 	nvcfApiUrl, err := url.Parse(nvcfApiHost)
 	if err != nil || nvcfApiUrl.Scheme == "" || nvcfApiUrl.Host == "" {
 		return nil, fmt.Errorf("invalid NVCF API host: %s", nvcfApiHost)
@@ -209,7 +261,7 @@ func (d *VanityDirector) ServeExec(target VanityExecRequest, writer http.Respons
 	rp := *d.rp
 	rp.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, err error) {
 		proxyErr = err
-		writeBadGatewayProblem(writer, request, err)
+		writeProxyError(writer, request, err)
 	}
 	rp.ServeHTTP(writer, request)
 	return proxyErr
@@ -269,7 +321,9 @@ func appendTooManyRequestsMessage(body []byte, message string) []byte {
 		return body
 	}
 
-	if appendOpenAIErrorMessage(parsed, message) || appendProblemDetailsMessage(parsed, message) {
+	if appendOpenAIErrorMessage(parsed, message) ||
+		appendProblemDetailsMessage(parsed, message) ||
+		appendPlainMessage(parsed, message) {
 		if b, err := json.Marshal(parsed); err == nil {
 			return b
 		}
@@ -287,6 +341,17 @@ func appendOpenAIErrorMessage(parsed map[string]any, message string) bool {
 		return false
 	}
 	errorObj["message"] = msg + " " + message
+	return true
+}
+
+// appendPlainMessage handles a bare {"message": "..."} body, which is what echo
+// renders for the LLM Gateway's errors. Kept last so the two specific shapes win.
+func appendPlainMessage(parsed map[string]any, message string) bool {
+	msg, ok := parsed["message"].(string)
+	if !ok {
+		return false
+	}
+	parsed["message"] = msg + " " + message
 	return true
 }
 

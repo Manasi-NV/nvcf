@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-load("@stargate_crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@aspect_bazel_lib//lib:expand_template.bzl", "expand_template")
+load("@rules_go//go:def.bzl", "go_test")
+load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script", "cargo_toml_env_vars")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("@stargate_crates//:defs.bzl", "aliases", "all_crate_deps")
 load("//rules/oci:defs.bzl", "rust_oci_image")
 
 # Workspace-local Cargo deps that have to be expressed as Bazel labels
@@ -11,40 +15,39 @@ load("//rules/oci:defs.bzl", "rust_oci_image")
 # `workspace = true` references against own-workspace members are not in
 # that set).
 _WORKSPACE_DEPS = [
-    "//crates/proto:stargate-proto",
-    "//crates/protocol:stargate-protocol",
-    "//crates/stargate-auth:stargate-auth",
-    "//crates/stargate-forwarding:stargate-forwarding",
-    "//crates/stargate-runtime:stargate-runtime",
-    "//crates/stargate-telemetry:stargate-telemetry",
-    "//crates/stargate-tls:stargate-tls",
+    "//src/libraries/rust/stargate/crates/proto:stargate-proto",
+    "//src/libraries/rust/stargate/crates/protocol:stargate-protocol",
+    "//src/libraries/rust/stargate/crates/stargate-auth:stargate-auth",
+    "//src/libraries/rust/stargate/crates/stargate-forwarding:stargate-forwarding",
+    "//src/libraries/rust/stargate/crates/stargate-runtime:stargate-runtime",
+    "//src/libraries/rust/stargate/crates/stargate-telemetry:stargate-telemetry",
+    "//src/libraries/rust/stargate/crates/stargate-tls:stargate-tls",
 ]
+
+# Stamp the binary build metadata with the same version used for the OCI image
+# tag, even when Bazel is invoked with --nostamp.
+expand_template(
+    name = "version_env",
+    out = "version.env",
+    stamp = 1,
+    stamp_substitutions = {"{VERSION}": "{{STABLE_VERSION}}"},
+    template = ["STARGATE_BUILD_VERSION={VERSION}"],
+)
+
+cargo_toml_env_vars(
+    name = "cargo_env",
+    src = "Cargo.toml",
+    workspace = "//src/libraries/rust/stargate:Cargo.toml",
+)
 
 # build.rs writes build metadata via the `built` crate (git2 feature). The
 # git-commit fields resolve to None under the Bazel sandbox (no .git in the
 # action tree); src/main.rs already tolerates that with `.unwrap_or("unknown")`.
-# The released image tag is stamped separately through tools/workspace_status.sh.
 cargo_build_script(
     name = "build_script",
+    edition = "2024",
     srcs = ["build.rs"],
-    # The `built` crate reads the CARGO_PKG_* variables that cargo would
-    # normally export; cargo_build_script does not set them, so `built`
-    # panics ("Missing expected environment variable CARGO_PKG_VERSION").
-    # Supply the workspace metadata explicitly (mirrors [workspace.package]
-    # in the root Cargo.toml).
-    build_script_env = {
-        "CARGO_PKG_VERSION": "0.4.0",
-        "CARGO_PKG_VERSION_MAJOR": "0",
-        "CARGO_PKG_VERSION_MINOR": "4",
-        "CARGO_PKG_VERSION_PATCH": "0",
-        "CARGO_PKG_VERSION_PRE": "",
-        "CARGO_PKG_NAME": "stargate",
-        "CARGO_PKG_AUTHORS": "NVIDIA",
-        "CARGO_PKG_DESCRIPTION": "Stargate control plane",
-        "CARGO_PKG_HOMEPAGE": "https://github.com/nvidia-lpu/stargate",
-        "CARGO_PKG_REPOSITORY": "https://github.com/nvidia-lpu/stargate.git",
-        "CARGO_PKG_LICENSE": "Apache-2.0",
-    },
+    build_script_env_files = [":cargo_env"],
     deps = all_crate_deps(build = True),
 )
 
@@ -62,6 +65,7 @@ rust_library(
         ],
     ),
     aliases = aliases(),
+    compile_data = ["//src/libraries/rust/stargate:load_balancer_configuration_doc"],
     crate_name = "stargate",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
@@ -79,8 +83,24 @@ rust_binary(
     crate_root = "src/main.rs",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env_files = [":version_env"],
     visibility = ["//visibility:public"],
     deps = [":stargate_lib", ":build_script"] + _WORKSPACE_DEPS + all_crate_deps(normal = True),
+)
+
+py_test(
+    name = "version_test",
+    srcs = ["version_test.py"],
+    args = [
+        "$(location :stargate)",
+        "$(location :version_env)",
+    ],
+    data = [
+        ":stargate",
+        ":version_env",
+    ],
+    python_version = "3.11",
+    size = "small",
 )
 
 rust_test(
@@ -98,11 +118,11 @@ rust_test(
         "--skip",
         "load_balancer::tests::bundled_benchmark_lb_configs_parse",
     ],
-    data = ["//:benches"],
+    data = ["//src/libraries/rust/stargate:benches"],
     # Test target needs the workspace-local deps in addition to the
     # third-party dev deps. `pylon-lib` is a dev-dependency only here.
     deps = _WORKSPACE_DEPS + [
-        "//crates/pylon-lib:pylon-lib",
+        "//src/libraries/rust/stargate/crates/pylon-lib:pylon-lib-test-support",
     ] + all_crate_deps(normal_dev = True),
 )
 
@@ -113,6 +133,7 @@ rust_oci_image(
     base = "@distroless_cc",
     binary = ":stargate",
     binary_path = "/usr/local/bin/stargate",
+    extra_layers = ["//src/libraries/rust/stargate/crates/stargate-k8s-router:stargate-k8s-router-image_layer"],
     tags = ["stargate"],
     visibility = ["//visibility:public"],
 )
@@ -122,10 +143,27 @@ rust_oci_image(
 # MR feedback memory feedback_image_entrypoint_exec_bit.
 sh_test(
     name = "image_entrypoint_mode_test",
-    srcs = ["//tools/ci:image_entrypoint_mode_test.sh"],
+    srcs = ["//src/libraries/rust/stargate/tools/ci:image_entrypoint_mode_test.sh"],
     args = [
         "$(location :image_layer)",
         "/usr/local/bin/stargate",
     ],
     data = [":image_layer"],
+)
+
+# Composite-image guard. Inspect every platform manifest reachable from the
+# assembled OCI index so removing the router's extra layer fails this test.
+go_test(
+    name = "image_router_binary_unit_test",
+    srcs = ["image_router_binary_test.go"],
+)
+
+go_test(
+    name = "image_router_binary_test",
+    srcs = ["image_router_binary_test.go"],
+    args = [
+        "-image-layout=$(location :image)",
+        "-image-path=/usr/local/bin/stargate-k8s-router",
+    ],
+    data = [":image"],
 )

@@ -24,11 +24,64 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
+
+func TestSelfManagedOpenBaoWebhookDefaultsToIgnore(t *testing.T) {
+	const baseConfigPath = "../../deploy/stacks/self-managed/environments/base.yaml"
+
+	var config struct {
+		OpenBao struct {
+			Injector struct {
+				Webhook map[string]any `yaml:"webhook"`
+			} `yaml:"injector"`
+		} `yaml:"openbao"`
+	}
+
+	baseConfig, err := os.ReadFile(baseConfigPath)
+	if err != nil {
+		t.Fatalf("read self-managed base config: %v", err)
+	}
+	if err := yaml.Unmarshal(baseConfig, &config); err != nil {
+		t.Fatalf("parse self-managed base config: %v", err)
+	}
+
+	webhook := config.OpenBao.Injector.Webhook
+	if got, want := webhook["failurePolicy"], "Ignore"; got != want {
+		t.Fatalf("openbao injector failurePolicy = %q, want %q", got, want)
+	}
+	if selector, exists := webhook["namespaceSelector"]; exists {
+		t.Fatalf("openbao injector namespaceSelector = %#v, want it omitted", selector)
+	}
+}
+
+func TestSelfManagedOpenBaoUIAppendRequiresCompatibleNamespaceExpression(t *testing.T) {
+	const templatePath = "../../deploy/stacks/self-managed/global.yaml.gotmpl"
+
+	templateBytes, err := os.ReadFile(templatePath)
+	if err != nil {
+		t.Fatalf("read self-managed values template: %v", err)
+	}
+	templateBody := string(templateBytes)
+
+	for _, want := range []string{
+		`range $expr := $matchExpressions`,
+		`eq (dig "key" "" $expr) "kubernetes.io/metadata.name"`,
+		`eq (dig "operator" "" $expr) "In"`,
+		`not (has "nvcf-ui" $values)`,
+	} {
+		if !strings.Contains(templateBody, want) {
+			t.Errorf("self-managed values template missing OpenBao selector guard %q", want)
+		}
+	}
+	if strings.Contains(templateBody, `index $matchExpressions 0`) {
+		t.Error("self-managed values template assumes the first OpenBao selector expression accepts namespace values")
+	}
+}
 
 // TestNVCFCLINonlocalFixtureMatchesCLITemplate asserts every top-level
 // key in tests/bdd/fixtures/nvcf-cli-nonlocal.yaml.template is also
@@ -92,12 +145,87 @@ func TestNVCFCLILocalFixtureTargetsLocalGRPCGateway(t *testing.T) {
 	if err := yaml.Unmarshal(fixtureBytes, &fixture); err != nil {
 		t.Fatalf("parse local CLI fixture: %v", err)
 	}
-	if got, want := fixture["base_grpc_url"], "localhost:10081"; got != want {
+	if got, want := fixture["base_grpc_url"], "grpc.localhost:10081"; got != want {
 		t.Fatalf("base_grpc_url = %v, want %q", got, want)
 	}
 }
 
-func TestSelfManagedLocalBDDMultiFixtureWiresGRPCWorkerCallback(t *testing.T) {
+func TestComputePlaneLocalBDDFixturesDisableResourceSizingFeatureGates(t *testing.T) {
+	want := []string{
+		"-InfraResourceOverhead",
+		"-EnforceHelmFunctionResourceLimits",
+		"-EnforceContainerFunctionResourceLimits",
+		"-EnforceHelmTaskResourceLimits",
+		"-EnforceContainerTaskResourceLimits",
+	}
+
+	for _, fixturePath := range []string{
+		"fixtures/nvcf-compute-plane-local-bdd.yaml",
+		"fixtures/nvcf-compute-plane-local-bdd-multi.yaml",
+	} {
+		t.Run(filepath.Base(fixturePath), func(t *testing.T) {
+			fixtureBytes, err := os.ReadFile(fixturePath)
+			if err != nil {
+				t.Fatalf("read compute-plane fixture %s: %v", fixturePath, err)
+			}
+			var fixture struct {
+				Global struct {
+					NVCAOperator struct {
+						SelfManaged struct {
+							FeatureGateValues []string `yaml:"featureGateValues"`
+						} `yaml:"selfManaged"`
+					} `yaml:"nvcaOperator"`
+				} `yaml:"global"`
+			}
+			if err := yaml.Unmarshal(fixtureBytes, &fixture); err != nil {
+				t.Fatalf("parse compute-plane fixture %s: %v", fixturePath, err)
+			}
+
+			got := fixture.Global.NVCAOperator.SelfManaged.FeatureGateValues
+			if !slices.Equal(got, want) {
+				t.Fatalf("featureGateValues = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestComputePlaneLocalBDDFixturesRequireSecureQUIC(t *testing.T) {
+	for _, fixturePath := range []string{
+		"fixtures/nvcf-compute-plane-local-bdd.yaml",
+		"fixtures/nvcf-compute-plane-local-bdd-multi.yaml",
+	} {
+		t.Run(filepath.Base(fixturePath), func(t *testing.T) {
+			fixtureBytes, err := os.ReadFile(fixturePath)
+			if err != nil {
+				t.Fatalf("read compute-plane fixture %s: %v", fixturePath, err)
+			}
+			var fixture struct {
+				AgentConfig struct {
+					MergeConfig string `yaml:"mergeConfig"`
+				} `yaml:"agentConfig"`
+			}
+			if err := yaml.Unmarshal(fixtureBytes, &fixture); err != nil {
+				t.Fatalf("parse compute-plane fixture %s: %v", fixturePath, err)
+			}
+			var mergeConfig struct {
+				Workload struct {
+					StargateQUICInsecure *bool `yaml:"stargateQUICInsecure"`
+				} `yaml:"workload"`
+			}
+			if err := yaml.Unmarshal([]byte(fixture.AgentConfig.MergeConfig), &mergeConfig); err != nil {
+				t.Fatalf("parse agent merge config in %s: %v", fixturePath, err)
+			}
+			if mergeConfig.Workload.StargateQUICInsecure == nil {
+				t.Fatalf("%s does not set workload.stargateQUICInsecure", fixturePath)
+			}
+			if *mergeConfig.Workload.StargateQUICInsecure {
+				t.Fatalf("%s enables insecure QUIC with profile-provided bundle trust", fixturePath)
+			}
+		})
+	}
+}
+
+func TestSelfManagedLocalBDDMultiFixtureWiresComputeReachableWorkerEndpoints(t *testing.T) {
 	fixtureBytes, err := os.ReadFile("fixtures/self-managed-local-bdd-multi.yaml")
 	if err != nil {
 		t.Fatalf("read multi-cluster stack fixture: %v", err)
@@ -105,15 +233,40 @@ func TestSelfManagedLocalBDDMultiFixtureWiresGRPCWorkerCallback(t *testing.T) {
 	fixture := string(fixtureBytes)
 	for _, want := range []string{
 		"workerConnectBaseURL: http://grpc.nvcf.svc.cluster.local:10086",
-		"chart: ../../../helm/gateway-routes/chart",
-		`version: ""`,
+		"llmRequestRouterAddress: https://llm-request-router.nvcf.svc.cluster.local:50071",
+		"chartPath: ../../../helm/gateway-routes/chart",
+		"chartPath: ../../../helm/llm-request-router/llm-request-router",
+		"pylonGrpcDialAddress: https://llm-request-router.nvcf.svc.cluster.local:50071",
+		"secretName: llm-request-router-grpc-tls",
+		"pylonReverseTunnelDialAddress: llm-request-router.nvcf.svc.cluster.local:50072",
+		"*.llm-request-router-headless.nvcf.svc.cluster.local",
 		"grpcWorker:",
+		"llmWorker:",
 		"enabled: true",
 		"listenerName: worker-tcp",
+		"listenerName: llm-grpc",
+		"listenerName: llm-quic",
 	} {
 		if !strings.Contains(fixture, want) {
 			t.Fatalf("multi-cluster stack fixture missing %q", want)
 		}
+	}
+}
+
+func TestSelfManagedLocalBDDMultiFixtureUsesStackDefaultForNVCFGRPC(t *testing.T) {
+	const fixturePath = "fixtures/self-managed-local-bdd-multi.yaml"
+
+	fixtureBytes, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read multi-cluster stack fixture: %v", err)
+	}
+	var fixture map[string]any
+	if err := yaml.Unmarshal(fixtureBytes, &fixture); err != nil {
+		t.Fatalf("parse multi-cluster stack fixture: %v", err)
+	}
+	fixtureYAML := string(fixtureBytes)
+	if strings.Contains(fixtureYAML, "grpcInsecure") {
+		t.Fatal("multi-cluster stack fixture must exercise the stack default for NVCF API gRPC")
 	}
 }
 
@@ -145,6 +298,7 @@ func TestNVCTTaskSmokeUsesTaskSimpleSample(t *testing.T) {
 		"Key-Issuer-Service",
 		"NVCT_BDD_STATE_PATH",
 		"NVCT_BDD_TASKS_HOST",
+		"NVCT_BDD_TASK_INSTANCE_TYPE must be set",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("NVCT task smoke script does not reference %q", want)
@@ -158,6 +312,9 @@ func TestNVCTTaskSmokeUsesTaskSimpleSample(t *testing.T) {
 	}
 	if strings.Contains(script, "docker.io/library/busybox") {
 		t.Fatal("NVCT task smoke script still uses the synthetic busybox sample")
+	}
+	if strings.Contains(script, "NVCT_BDD_TASK_INSTANCE_TYPE:-") {
+		t.Fatal("NVCT task smoke script has a topology-dependent instance type default")
 	}
 }
 
@@ -218,7 +375,6 @@ printf '%s has address 192.0.2.10\n' "$1"
 
 func TestWaitForDNSRequiresStableSystemResolution(t *testing.T) {
 	binDir := t.TempDir()
-	countPath := filepath.Join(binDir, "resolver-count")
 	resolverScript := `#!/usr/bin/env bash
 set -euo pipefail
 count=0
@@ -244,21 +400,33 @@ fi
 		t.Fatalf("write fake sleep: %v", err)
 	}
 
-	cmd := exec.Command("bash", "scripts/wait-for-dns.sh", "gateway.example.invalid", "30")
-	cmd.Env = append(os.Environ(), "FAKE_RESOLVER_COUNT="+countPath, "PATH="+binDir+":"+os.Getenv("PATH"))
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("wait for stable DNS: %v\n%s", err, out)
+	tests := []struct {
+		name    string
+		timeout string
+	}{
+		{name: "normal timeout", timeout: "30"},
+		{name: "maximum int64 timeout", timeout: "9223372036854775807"},
 	}
-	if got := string(out); !strings.Contains(got, "3 consecutive system-resolver checks after 5 attempts") {
-		t.Fatalf("wait output did not report stable resolution: %q", got)
-	}
-	count, err := os.ReadFile(countPath)
-	if err != nil {
-		t.Fatalf("read resolver attempt count: %v", err)
-	}
-	if got, want := strings.TrimSpace(string(count)), "5"; got != want {
-		t.Fatalf("resolver attempts = %s, want %s", got, want)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			countPath := filepath.Join(t.TempDir(), "resolver-count")
+			cmd := exec.Command("bash", "scripts/wait-for-dns.sh", "gateway.example.invalid", tc.timeout)
+			cmd.Env = append(os.Environ(), "FAKE_RESOLVER_COUNT="+countPath, "PATH="+binDir+":"+os.Getenv("PATH"))
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("wait for stable DNS: %v\n%s", err, out)
+			}
+			if got := string(out); !strings.Contains(got, "3 consecutive system-resolver checks after 5 attempts") {
+				t.Fatalf("wait output did not report stable resolution: %q", got)
+			}
+			count, err := os.ReadFile(countPath)
+			if err != nil {
+				t.Fatalf("read resolver attempt count: %v", err)
+			}
+			if got, want := strings.TrimSpace(string(count)), "5"; got != want {
+				t.Fatalf("resolver attempts = %s, want %s", got, want)
+			}
+		})
 	}
 }
 

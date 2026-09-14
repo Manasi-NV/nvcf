@@ -2,11 +2,14 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "service",
-    srcs = ["service.go"],
+    srcs = [
+        "service.go",
+        "shutdown.go",
+    ],
     importpath = "github.com/NVIDIA/nvcf/src/compute-plane-services/worker-utils/service",
     visibility = ["//visibility:public"],
     deps = [
-        "//worker",
+        "//src/compute-plane-services/worker-utils/worker",
         "@com_github_go_viper_mapstructure_v2//:mapstructure",
         "@com_github_nvidia_nvcf_src_libraries_go_lib//pkg/nvkit/config",
         "@com_github_nvidia_nvcf_src_libraries_go_lib//pkg/nvkit/logs",
@@ -28,6 +31,7 @@ go_test(
         "main_test.go",
         "service_command_test.go",
         "service_test.go",
+        "shutdown_test.go",
     ],
     embed = [":service"],
     # keep: binds the upstream-hardcoded fixed ports (asset 8001, S3 8002, NVCF
@@ -36,7 +40,7 @@ go_test(
     # this suite against worker_test; run exclusively to avoid the port clash.
     tags = ["exclusive"],
     deps = [
-        "//worker",
+        "//src/compute-plane-services/worker-utils/worker",
         "@com_github_cenkalti_backoff_v4//:backoff",
         "@com_github_google_uuid//:uuid",
         "@com_github_nats_io_nats_go//:nats_go",

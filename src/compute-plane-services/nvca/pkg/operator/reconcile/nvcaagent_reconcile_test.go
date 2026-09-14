@@ -41,6 +41,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 
@@ -273,6 +274,7 @@ func TestSetupNVCADeployment(t *testing.T) {
 					Values: []string{
 						"LogPosting",
 						"CachingSupport",
+						"GracefulNoGPU",
 						"PeriodicInstanceStatusUpdate",
 						"SharedCluster",
 					},
@@ -322,6 +324,7 @@ func TestSetupNVCADeployment(t *testing.T) {
 			LogLevel: "info",
 			FeatureFlags: []string{
 				"CachingSupport",
+				"GracefulNoGPU",
 				"LogPosting",
 				"PeriodicInstanceStatusUpdate",
 				"SharedCluster",
@@ -538,6 +541,7 @@ func TestSetupNVCADeployment(t *testing.T) {
 	assert.Equal(t, expectedAnnotations, gotSvc.Annotations)
 	assert.Equal(t, expectedAnnotations, gotDep.Annotations)
 	assert.Empty(t, gotDep.Spec.Template.Annotations)
+	assert.Equal(t, appsv1.RecreateDeploymentStrategyType, gotDep.Spec.Strategy.Type)
 
 	// Try rollout with the same spec.
 	err = bc.setupNVCADeployment(ctx, inNVCFBackend)
@@ -631,6 +635,7 @@ func TestSetupNVCADeployment_OverrideEnvironmentVars(t *testing.T) {
 		gotDep, getErr = depIface.Get(ctx, nvcaoptypes.NVCAModuleName, metav1.GetOptions{})
 		require.NoError(ct, getErr)
 	}, 10*time.Second, 100*time.Millisecond)
+	assert.Empty(t, gotDep.Spec.Strategy.Type, "default rollout strategy must remain unchanged")
 
 	var nvcaContainer *corev1.Container
 	for i := range gotDep.Spec.Template.Spec.Containers {
@@ -1588,6 +1593,8 @@ func Test_setupNVCARBAC(t *testing.T) {
 			{
 				APIGroups: []string{"nvca.nvcf.nvidia.io"},
 				Resources: []string{
+					"modelcachebindings",
+					"modelcachebindings/status",
 					"storagerequests",
 					"storagerequests/status",
 				},
@@ -1618,6 +1625,11 @@ func Test_setupNVCARBAC(t *testing.T) {
 				Resources:     []string{"mutatingwebhookconfigurations", "validatingwebhookconfigurations"},
 				ResourceNames: []string{nvcaoptypes.NVCAModuleName},
 				Verbs:         []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"nvsnap.nvcf.nvidia.io"},
+				Resources: []string{"nvsnapfunctionstates", "nvsnapfunctionstates/status"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "delete", "patch"},
 			},
 			{}, // Node rule, added below
 			{
@@ -2003,6 +2015,8 @@ func Test_setupNVCARBAC_ValidationPolicy(t *testing.T) {
 			{
 				APIGroups: []string{"nvca.nvcf.nvidia.io"},
 				Resources: []string{
+					"modelcachebindings",
+					"modelcachebindings/status",
 					"storagerequests",
 					"storagerequests/status",
 				},
@@ -2033,6 +2047,11 @@ func Test_setupNVCARBAC_ValidationPolicy(t *testing.T) {
 				Resources:     []string{"mutatingwebhookconfigurations", "validatingwebhookconfigurations"},
 				ResourceNames: []string{nvcaoptypes.NVCAModuleName},
 				Verbs:         []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"nvsnap.nvcf.nvidia.io"},
+				Resources: []string{"nvsnapfunctionstates", "nvsnapfunctionstates/status"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "delete", "patch"},
 			},
 			{
 				APIGroups: []string{""},
@@ -2232,6 +2251,8 @@ func Test_NVLinkOptimized(t *testing.T) {
 			{
 				APIGroups: []string{"nvca.nvcf.nvidia.io"},
 				Resources: []string{
+					"modelcachebindings",
+					"modelcachebindings/status",
 					"storagerequests",
 					"storagerequests/status",
 				},
@@ -2260,6 +2281,11 @@ func Test_NVLinkOptimized(t *testing.T) {
 				Resources:     []string{"mutatingwebhookconfigurations", "validatingwebhookconfigurations"},
 				ResourceNames: []string{nvcaoptypes.NVCAModuleName},
 				Verbs:         []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"nvsnap.nvcf.nvidia.io"},
+				Resources: []string{"nvsnapfunctionstates", "nvsnapfunctionstates/status"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "delete", "patch"},
 			},
 			{
 				APIGroups: []string{""},
@@ -2454,6 +2480,7 @@ func TestGetInternalPersistentStorageConfig(t *testing.T) {
 	}
 }
 
+// TestGetNetworkPoliciesDataEmptyDDCSIPList verifies generated network policies without DDCS CIDRs.
 func TestGetNetworkPoliciesDataEmptyDDCSIPList(t *testing.T) {
 	expNPNames := []string{
 		EgressNetworkPolicyNameKey,
@@ -2476,7 +2503,15 @@ func TestGetNetworkPoliciesDataEmptyDDCSIPList(t *testing.T) {
 	got, err := bc.getNetworkPoliciesData(newTestContext(), nb)
 	require.NoError(t, err)
 	assert.Len(t, got, len(expNPNames))
-	assertNetworkPolicyAllowsTCPPort(t, got[IngressNetworkPolicyNameKey], IngressNetworkPolicyNameKey, 8888)
+	assertNetworkPolicyAllowsTCPPort(
+		t, got[IngressNetworkPolicyNameKey], IngressNetworkPolicyNameKey, intstr.FromInt32(8888),
+	)
+	assertNetworkPolicyAllowsTCPPort(
+		t, got[IngressNetworkPolicyNameKey], IngressNetworkPolicyNameKey, intstr.FromString("worker-metrics"),
+	)
+	assertNetworkPolicyOmitsTCPPort(
+		t, got[IngressNetworkPolicyNameKey], IngressNetworkPolicyNameKey, intstr.FromInt32(9089),
+	)
 	b := &bytes.Buffer{}
 	require.NoError(t, err)
 	for _, k := range expNPNames {
@@ -2486,6 +2521,7 @@ func TestGetNetworkPoliciesDataEmptyDDCSIPList(t *testing.T) {
 	assert.Equal(t, stripSPDXHeaders(readTestdataFile(t, filepath.Join("testdata", "netpols.yaml"))), stripSPDXHeaders(b.String()))
 }
 
+// TestGetNetworkPoliciesDataWithDDCSIPList verifies generated network policies with DDCS CIDRs.
 func TestGetNetworkPoliciesDataWithDDCSIPList(t *testing.T) {
 	expNPNames := []string{
 		EgressNetworkPolicyNameKey,
@@ -2509,7 +2545,15 @@ func TestGetNetworkPoliciesDataWithDDCSIPList(t *testing.T) {
 	got, err := bc.getNetworkPoliciesData(newTestContext(), nb)
 	require.NoError(t, err)
 	assert.Len(t, got, len(expNPNames))
-	assertNetworkPolicyAllowsTCPPort(t, got[IngressNetworkPolicyNameKey], IngressNetworkPolicyNameKey, 8888)
+	assertNetworkPolicyAllowsTCPPort(
+		t, got[IngressNetworkPolicyNameKey], IngressNetworkPolicyNameKey, intstr.FromInt32(8888),
+	)
+	assertNetworkPolicyAllowsTCPPort(
+		t, got[IngressNetworkPolicyNameKey], IngressNetworkPolicyNameKey, intstr.FromString("worker-metrics"),
+	)
+	assertNetworkPolicyOmitsTCPPort(
+		t, got[IngressNetworkPolicyNameKey], IngressNetworkPolicyNameKey, intstr.FromInt32(9089),
+	)
 	b := &bytes.Buffer{}
 	require.NoError(t, err)
 	for _, k := range expNPNames {
@@ -2519,7 +2563,8 @@ func TestGetNetworkPoliciesDataWithDDCSIPList(t *testing.T) {
 	assert.Equal(t, stripSPDXHeaders(readTestdataFile(t, filepath.Join("testdata", "netpols_with_ddcs.yaml"))), stripSPDXHeaders(b.String()))
 }
 
-func assertNetworkPolicyAllowsTCPPort(t *testing.T, policyYAML, policyName string, port int32) {
+// assertNetworkPolicyAllowsTCPPort verifies a policy allows a numeric or named TCP destination port.
+func assertNetworkPolicyAllowsTCPPort(t *testing.T, policyYAML, policyName string, port intstr.IntOrString) {
 	t.Helper()
 
 	var policy netv1.NetworkPolicy
@@ -2531,15 +2576,41 @@ func assertNetworkPolicyAllowsTCPPort(t *testing.T, policyYAML, policyName strin
 			if networkPolicyPort.Port == nil || networkPolicyPort.Protocol == nil {
 				continue
 			}
-			if networkPolicyPort.Port.IntVal == port && *networkPolicyPort.Protocol == corev1.ProtocolTCP {
+			if *networkPolicyPort.Port == port && *networkPolicyPort.Protocol == corev1.ProtocolTCP {
 				return
 			}
 		}
 	}
 
-	assert.Failf(t, "missing TCP port", "%s should allow TCP port %d", policyName, port)
+	assert.Failf(t, "missing TCP port", "%s should allow TCP port %q", policyName, port.String())
 }
 
+// assertNetworkPolicyOmitsTCPPort verifies a policy does not explicitly declare a numeric or named TCP port.
+func assertNetworkPolicyOmitsTCPPort(t *testing.T, policyYAML, policyName string, port intstr.IntOrString) {
+	t.Helper()
+
+	var policy netv1.NetworkPolicy
+	require.NoError(t, yaml.Unmarshal([]byte(policyYAML), &policy))
+	require.Equal(t, policyName, policy.Name)
+
+	for _, ingressRule := range policy.Spec.Ingress {
+		for _, networkPolicyPort := range ingressRule.Ports {
+			if networkPolicyPort.Port == nil {
+				continue
+			}
+			protocol := corev1.ProtocolTCP
+			if networkPolicyPort.Protocol != nil {
+				protocol = *networkPolicyPort.Protocol
+			}
+			assert.Falsef(t,
+				*networkPolicyPort.Port == port && protocol == corev1.ProtocolTCP,
+				"%s should not explicitly declare TCP port %q", policyName, port.String(),
+			)
+		}
+	}
+}
+
+// TestGetEffectiveK8sNetworkCIDRs verifies the network CIDRs used by generated policies.
 func TestGetEffectiveK8sNetworkCIDRs(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -2852,6 +2923,21 @@ func TestEncodeAgentConfig_MergesBYOOConfig(t *testing.T) {
 						},
 					},
 				},
+				LogSampling: nvcaconfig.BYOOOTelLogSamplingConfig{
+					SamplingPercentage: ptr.To(10.0),
+					Mode:               "hash_seed",
+					HashSeed:           ptr.To(uint32(1234)),
+					FailClosed:         ptr.To(false),
+					AttributeSource:    "record",
+					FromAttribute:      "log.id",
+					SamplingPriority:   "sampling.priority",
+				},
+				TraceSampling: nvcaconfig.BYOOOTelSamplingConfig{
+					SamplingPercentage: ptr.To(1.0),
+					Mode:               "hash_seed",
+					HashSeed:           ptr.To(uint32(1234)),
+					FailClosed:         ptr.To(false),
+				},
 			},
 			BYOODebugMode: nvcaconfig.BYOODebugModeConfig{
 				Enabled: true,
@@ -2883,6 +2969,23 @@ func TestEncodeAgentConfig_MergesBYOOConfig(t *testing.T) {
 	require.NotNil(t, got.Agent.BYOOOTelCollector.ExporterHelper.SendingQueue.Batch.MaxSize)
 	assert.Equal(t, int64(1000000), *got.Agent.BYOOOTelCollector.ExporterHelper.SendingQueue.Batch.MinSize)
 	assert.Equal(t, int64(1000000), *got.Agent.BYOOOTelCollector.ExporterHelper.SendingQueue.Batch.MaxSize)
+	require.NotNil(t, got.Agent.BYOOOTelCollector.LogSampling.SamplingPercentage)
+	assert.Equal(t, 10.0, *got.Agent.BYOOOTelCollector.LogSampling.SamplingPercentage)
+	assert.Equal(t, "hash_seed", got.Agent.BYOOOTelCollector.LogSampling.Mode)
+	require.NotNil(t, got.Agent.BYOOOTelCollector.LogSampling.HashSeed)
+	assert.Equal(t, uint32(1234), *got.Agent.BYOOOTelCollector.LogSampling.HashSeed)
+	require.NotNil(t, got.Agent.BYOOOTelCollector.LogSampling.FailClosed)
+	assert.False(t, *got.Agent.BYOOOTelCollector.LogSampling.FailClosed)
+	assert.Equal(t, "record", got.Agent.BYOOOTelCollector.LogSampling.AttributeSource)
+	assert.Equal(t, "log.id", got.Agent.BYOOOTelCollector.LogSampling.FromAttribute)
+	assert.Equal(t, "sampling.priority", got.Agent.BYOOOTelCollector.LogSampling.SamplingPriority)
+	require.NotNil(t, got.Agent.BYOOOTelCollector.TraceSampling.SamplingPercentage)
+	assert.Equal(t, 1.0, *got.Agent.BYOOOTelCollector.TraceSampling.SamplingPercentage)
+	assert.Equal(t, "hash_seed", got.Agent.BYOOOTelCollector.TraceSampling.Mode)
+	require.NotNil(t, got.Agent.BYOOOTelCollector.TraceSampling.HashSeed)
+	assert.Equal(t, uint32(1234), *got.Agent.BYOOOTelCollector.TraceSampling.HashSeed)
+	require.NotNil(t, got.Agent.BYOOOTelCollector.TraceSampling.FailClosed)
+	assert.False(t, *got.Agent.BYOOOTelCollector.TraceSampling.FailClosed)
 	assert.True(t, got.Agent.BYOODebugMode.Enabled)
 	assert.True(t, got.Agent.BYOOMetricSubset.Enabled)
 	assert.Contains(t, got.Agent.BYOOMetricSubset.FilterConfig, "metric.name")
@@ -4478,7 +4581,7 @@ func TestSetupOTelCollectorConfigMap(t *testing.T) {
 				require.NoError(t, err)
 				assert.NotNil(t, cm)
 				assert.Contains(t, cm.Data, "config.yaml")
-				assert.Contains(t, cm.Data["config.yaml"], "k8s_events")
+				assertClusterWideK8sObjects(t, cm.Data["config.yaml"])
 				assert.Contains(t, cm.Data["config.yaml"], "memory_limiter")
 			} else {
 				_, err := clients.K8s.CoreV1().ConfigMaps(ns).Get(ctx, NVCAOTelCollectorConfigMapName, metav1.GetOptions{})
@@ -5006,10 +5109,10 @@ func Test_setupAgentConfigConfigMap(t *testing.T) {
 		},
 	}
 
-	agentCfg, err := bc.newAgentConfig(ctx, inNVCFBackend)
+	desiredConfigMap, err := bc.newAgentConfigConfigMap(ctx, inNVCFBackend)
 	require.NoError(t, err)
 
-	err = bc.setupAgentConfigConfigMap(ctx, inNVCFBackend, agentCfg)
+	err = bc.setupAgentConfigConfigMap(ctx, desiredConfigMap)
 	require.NoError(t, err)
 
 	gotCM, err := clients.K8s.CoreV1().ConfigMaps(DefaultNVCASystemNamespace).Get(ctx, agentConfigConfigMapName, metav1.GetOptions{})
@@ -5130,9 +5233,8 @@ func TestSetupAgentConfigConfigMapMergesTransportTLSFromAgentConfigMergeConfigMa
 				TrustMode:                nvcaconfig.TrustModeBundle,
 				TrustBundleConfigMapName: "nvcf-transport-trust-bundle",
 				TrustBundleKey:           "nvcf-ca-bundle.pem",
-				TrustBundleFingerprint:   "sha256:9a7814909424061a68756ee5c26aa1a1491b8d20a7b813fb24fa7e73b2fa1c93",
-				TrustBundlePEM:           "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-				InstallerImage:           "nvcr.io/nvidia/nvcf-byoc/nvca:2.51.0",
+				TrustBundleFingerprint:   "sha256:95b3dc7dfd3212a6f02c644527f0a65890a9a9c80acf7551be6aa89b1f98fe86",
+				TrustBundlePEM:           transportTrustTestPEM,
 			},
 		},
 	}
@@ -5157,7 +5259,9 @@ func TestSetupAgentConfigConfigMapMergesTransportTLSFromAgentConfigMergeConfigMa
 	require.NoError(t, err)
 	assert.Nil(t, cfg.Workload.TransportTLS)
 
-	err = bc.setupAgentConfigConfigMap(ctx, nb, cfg)
+	desiredConfigMap, err := bc.newAgentConfigConfigMap(ctx, nb)
+	require.NoError(t, err)
+	err = bc.setupAgentConfigConfigMap(ctx, desiredConfigMap)
 	require.NoError(t, err)
 
 	gotCM, err := clients.K8s.CoreV1().ConfigMaps(DefaultNVCASystemNamespace).Get(ctx, agentConfigConfigMapName, metav1.GetOptions{})
@@ -5171,63 +5275,9 @@ func TestSetupAgentConfigConfigMapMergesTransportTLSFromAgentConfigMergeConfigMa
 	assert.Equal(t, nvcaconfig.TrustModeBundle, gotCfg.Workload.TransportTLS.TrustMode)
 	assert.Equal(t, "nvcf-transport-trust-bundle", gotCfg.Workload.TransportTLS.TrustBundleConfigMapName)
 	assert.Equal(t, "nvcf-ca-bundle.pem", gotCfg.Workload.TransportTLS.TrustBundleKey)
-	assert.Equal(t, "sha256:9a7814909424061a68756ee5c26aa1a1491b8d20a7b813fb24fa7e73b2fa1c93",
+	assert.Equal(t, "sha256:95b3dc7dfd3212a6f02c644527f0a65890a9a9c80acf7551be6aa89b1f98fe86",
 		gotCfg.Workload.TransportTLS.TrustBundleFingerprint)
-	assert.Equal(t, "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-		gotCfg.Workload.TransportTLS.TrustBundlePEM)
-	assert.Equal(t, "nvcr.io/nvidia/nvcf-byoc/nvca:2.51.0", gotCfg.Workload.TransportTLS.InstallerImage)
-}
-
-func TestSetupAgentConfigConfigMapDefaultsTransportTLSInstallerImageFromNVCFBackend(t *testing.T) {
-	ctx := newTestContext()
-	clients := mockKubeClientsForIntegrationTests()
-	bc := &BackendK8sCache{
-		clients:           clients,
-		envType:           nvidiaiov1.EnvTypeStage,
-		operatorNamespace: NVCAOperatorNamespace,
-	}
-
-	mergeCfg := nvcaconfig.Config{
-		Workload: nvcaconfig.WorkloadConfig{
-			TransportTLS: &nvcaconfig.TransportTLSConfig{
-				TrustMode:                nvcaconfig.TrustModeBundle,
-				TrustBundleConfigMapName: "nvcf-transport-trust-bundle",
-				TrustBundleKey:           "nvcf-ca-bundle.pem",
-				TrustBundleFingerprint:   "sha256:9a7814909424061a68756ee5c26aa1a1491b8d20a7b813fb24fa7e73b2fa1c93",
-				TrustBundlePEM:           "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-			},
-		},
-	}
-	mergeCfgBytes, err := nvcaconfig.EncodeConfig(mergeCfg)
-	require.NoError(t, err)
-
-	_, err = clients.K8s.CoreV1().ConfigMaps(NVCAOperatorNamespace).Create(ctx, &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      agentConfigMergeConfigMapName,
-			Namespace: NVCAOperatorNamespace,
-		},
-		Data: map[string]string{
-			agentConfigFile: string(mergeCfgBytes),
-		},
-	}, metav1.CreateOptions{})
-	require.NoError(t, err)
-
-	nb := ngcManagedBackendWithAgentConfig(nvidiaiov1.AgentConfig{})
-	nb.Spec.NVCAImageConfig.Repository = "nvcr.io/nvidia/nvcf-byoc/nvca"
-	nb.Spec.Version = "2.51.0"
-
-	cfg, err := bc.newAgentConfig(ctx, nb)
-	require.NoError(t, err)
-	err = bc.setupAgentConfigConfigMap(ctx, nb, cfg)
-	require.NoError(t, err)
-
-	gotCM, err := clients.K8s.CoreV1().ConfigMaps(DefaultNVCASystemNamespace).Get(ctx, agentConfigConfigMapName, metav1.GetOptions{})
-	require.NoError(t, err)
-
-	gotCfg, err := nvcaconfig.DecodeConfig([]byte(gotCM.Data[agentConfigFile]))
-	require.NoError(t, err)
-	require.NotNil(t, gotCfg.Workload.TransportTLS)
-	assert.Equal(t, "nvcr.io/nvidia/nvcf-byoc/nvca:2.51.0", gotCfg.Workload.TransportTLS.InstallerImage)
+	assert.Equal(t, transportTrustTestPEM, gotCfg.Workload.TransportTLS.TrustBundlePEM)
 }
 
 func TestGetChartDefaultAgentConfig(t *testing.T) {

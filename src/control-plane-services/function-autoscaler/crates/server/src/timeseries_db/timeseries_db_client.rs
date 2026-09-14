@@ -27,6 +27,7 @@ use crate::timeseries_db::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
 use openssl::asn1::Asn1Time;
 use openssl::pkey::PKey;
@@ -57,7 +58,11 @@ fn query_range_url(mut base_url: Url, auth_mode: TimeseriesDbAuthMode) -> Result
     Ok(base_url)
 }
 
-fn mtls_identity(config: &TimeseriesDbSettings, base_url: &Url) -> Result<Identity> {
+fn mtls_identity(
+    config: &TimeseriesDbSettings,
+    base_url: &Url,
+    secrets_watcher: Option<&SecretFileWatcher>,
+) -> Result<Identity> {
     if base_url.scheme() != "https" {
         return Err(anyhow::anyhow!(
             "TimeseriesDb mTLS authentication requires an https URL"
@@ -69,24 +74,7 @@ fn mtls_identity(config: &TimeseriesDbSettings, base_url: &Url) -> Result<Identi
         ));
     }
 
-    let certificate_path = config.client_certificate_path.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("TimeseriesDb mTLS authentication requires client_certificate_path")
-    })?;
-    let private_key_path = config.client_private_key_path.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("TimeseriesDb mTLS authentication requires client_private_key_path")
-    })?;
-    let certificate_pem = std::fs::read(certificate_path).with_context(|| {
-        format!(
-            "Failed to read TimeseriesDb client certificate from {}",
-            certificate_path.display()
-        )
-    })?;
-    let private_key_pem = std::fs::read(private_key_path).with_context(|| {
-        format!(
-            "Failed to read TimeseriesDb client private key from {}",
-            private_key_path.display()
-        )
-    })?;
+    let (certificate_pem, private_key_pem) = mtls_identity_pem(config, secrets_watcher)?;
 
     let certificates = X509::stack_from_pem(&certificate_pem)
         .context("Failed to parse TimeseriesDb client certificate chain")?;
@@ -133,6 +121,75 @@ fn mtls_identity(config: &TimeseriesDbSettings, base_url: &Url) -> Result<Identi
         .context("Failed to encode TimeseriesDb client private key as PKCS#8")?;
     Identity::from_pkcs8_pem(&certificate_pem, &private_key_pem)
         .context("Failed to build TimeseriesDb client identity")
+}
+
+fn mtls_identity_pem(
+    config: &TimeseriesDbSettings,
+    secrets_watcher: Option<&SecretFileWatcher>,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    match (
+        config.client_certificate_path.as_ref(),
+        config.client_private_key_path.as_ref(),
+    ) {
+        (Some(certificate_path), Some(private_key_path)) => {
+            let certificate_pem = std::fs::read(certificate_path).with_context(|| {
+                format!(
+                    "Failed to read TimeseriesDb client certificate from {}",
+                    certificate_path.display()
+                )
+            })?;
+            let private_key_pem = std::fs::read(private_key_path).with_context(|| {
+                format!(
+                    "Failed to read TimeseriesDb client private key from {}",
+                    private_key_path.display()
+                )
+            })?;
+            Ok((certificate_pem, private_key_pem))
+        }
+        (Some(_), None) => Err(anyhow::anyhow!(
+            "TimeseriesDb mTLS authentication requires client_private_key_path when client_certificate_path is set"
+        )),
+        (None, Some(_)) => Err(anyhow::anyhow!(
+            "TimeseriesDb mTLS authentication requires client_certificate_path when client_private_key_path is set"
+        )),
+        (None, None) => mtls_identity_pem_from_secrets(secrets_watcher),
+    }
+}
+
+fn mtls_identity_pem_from_secrets(
+    secrets_watcher: Option<&SecretFileWatcher>,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let secrets_watcher = secrets_watcher.ok_or_else(|| {
+        anyhow::anyhow!(
+            "TimeseriesDb mTLS authentication requires client_certificate_path/client_private_key_path or mTLS credentials in secrets"
+        )
+    })?;
+    let secrets = secrets_watcher.get_config();
+    let timeseries_db_credentials = secrets
+        .timeseries_db
+        .ok_or_else(|| anyhow::anyhow!("TimeseriesDb mTLS credentials not found in secrets"))?;
+
+    let certificate_pem_b64 = timeseries_db_credentials
+        .client_certificate_pem_b64
+        .as_deref()
+        .ok_or_else(|| {
+            anyhow::anyhow!("TimeseriesDb mTLS credentials require client_certificate_pem_b64")
+        })?;
+    let private_key_pem_b64 = timeseries_db_credentials
+        .client_private_key_pem_b64
+        .as_deref()
+        .ok_or_else(|| {
+            anyhow::anyhow!("TimeseriesDb mTLS credentials require client_private_key_pem_b64")
+        })?;
+
+    let certificate_pem = BASE64_STANDARD
+        .decode(certificate_pem_b64)
+        .context("Failed to decode TimeseriesDb client certificate from base64")?;
+    let private_key_pem = BASE64_STANDARD
+        .decode(private_key_pem_b64)
+        .context("Failed to decode TimeseriesDb client private key from base64")?;
+
+    Ok((certificate_pem, private_key_pem))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -193,6 +250,14 @@ impl TimeseriesDbClient {
         config: &TimeseriesDbSettings,
         credential_provider: Option<Arc<dyn CredentialProvider + Send + Sync>>,
     ) -> Result<Self> {
+        Self::new_with_secrets(config, credential_provider, None)
+    }
+
+    pub(crate) fn new_with_secrets(
+        config: &TimeseriesDbSettings,
+        credential_provider: Option<Arc<dyn CredentialProvider + Send + Sync>>,
+        secrets_watcher: Option<Arc<SecretFileWatcher>>,
+    ) -> Result<Self> {
         let base_url = Url::parse(&config.timeseries_db_url).context("Failed to parse base URL")?;
         let auth_mode = config.effective_auth_mode();
 
@@ -205,7 +270,11 @@ impl TimeseriesDbClient {
         let http_timeout = StdDuration::from_secs(config.http_timeout_seconds);
         let mut client_builder = ClientBuilder::new().timeout(http_timeout);
         if auth_mode == TimeseriesDbAuthMode::Mtls {
-            client_builder = client_builder.identity(mtls_identity(config, &base_url)?);
+            client_builder = client_builder.identity(mtls_identity(
+                config,
+                &base_url,
+                secrets_watcher.as_deref(),
+            )?);
         }
 
         let http_client = reqwest_middleware::ClientBuilder::new(
@@ -317,7 +386,7 @@ impl TimeseriesDbClient {
             ("step", step.as_secs().to_string()),
         ];
 
-        if self.auth_mode != TimeseriesDbAuthMode::Token {
+        let result = if self.auth_mode != TimeseriesDbAuthMode::Token {
             self.execute_with_retry_no_auth(url, &query_params).await
         } else {
             self.execute_with_retry(move |token| {
@@ -326,7 +395,10 @@ impl TimeseriesDbClient {
                 async move { self.execute_request(url, &query_params, Some(&token)).await }
             })
             .await
-        }
+        };
+
+        *self.is_healthy.lock().unwrap() = result.is_ok();
+        result
     }
 
     // self and auth_token would add tokens or credentials to the traces, so they are excluded
@@ -530,14 +602,17 @@ impl CredentialProvider for AuthnCredentialProvider {
             let timeseries_db_credentials = secrets
                 .timeseries_db
                 .ok_or_else(|| anyhow::anyhow!("TimeseriesDb credentials not found in secrets"))?;
+            let username = timeseries_db_credentials.username.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("TimeseriesDb token credentials require username")
+            })?;
+            let password = timeseries_db_credentials.password.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("TimeseriesDb token credentials require password")
+            })?;
 
             let response = self
                 .http_client
                 .get(&self.authn_url)
-                .basic_auth(
-                    &timeseries_db_credentials.username,
-                    Some(&timeseries_db_credentials.password),
-                )
+                .basic_auth(username, Some(password))
                 .send()
                 .await
                 .context("Failed to send authentication request")?;
@@ -638,7 +713,7 @@ mod tests {
     use std::path::Path;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
     use std::time::Duration as StdDuration;
     use std::time::Duration;
@@ -689,6 +764,7 @@ mod tests {
         request_count: AtomicUsize,
         responses: Vec<(StatusCode, String)>,
         expected_auth_tokens: Vec<String>,
+        response_override: Mutex<Option<(StatusCode, String)>>,
     }
 
     impl MockServerState {
@@ -697,7 +773,12 @@ mod tests {
                 request_count: AtomicUsize::new(0),
                 responses,
                 expected_auth_tokens,
+                response_override: Mutex::new(None),
             }
+        }
+
+        fn set_response_override(&self, status: StatusCode, body: &str) {
+            *self.response_override.lock().unwrap() = Some((status, body.to_string()));
         }
 
         fn get_response(&self, auth_header: Option<&str>) -> Response<Full<Bytes>> {
@@ -720,6 +801,13 @@ mod tests {
                         .body(Full::new(Bytes::from("Unauthorized: Missing token")))
                         .unwrap();
                 }
+            }
+
+            if let Some((status, body)) = &*self.response_override.lock().unwrap() {
+                return Response::builder()
+                    .status(*status)
+                    .body(Full::new(Bytes::from(body.clone())))
+                    .unwrap();
             }
 
             // Return configured response
@@ -834,6 +922,13 @@ mod tests {
             .with_max_delay(TEST_MAX_BACKOFF_DELAY)
             .with_min_delay(DEFAULT_MIN_BACKOFF_DELAY)
             .with_factor(1.5)
+    }
+
+    fn immediate_retry_test_backoff() -> ExponentialBuilder {
+        ExponentialBuilder::default()
+            .with_max_times(1)
+            .with_max_delay(StdDuration::ZERO)
+            .with_min_delay(StdDuration::ZERO)
     }
 
     fn generate_client_identity(expired: bool) -> Result<(Vec<u8>, Vec<u8>)> {
@@ -965,6 +1060,34 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn mtls_accepts_identity_from_secret_config() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let secrets_path = directory.path().join("secrets.json");
+        let (certificate, private_key) = generate_client_identity(false)?;
+        let secrets_content = serde_json::json!({
+            "kv": {
+                "timeseries_db": {
+                    "client_certificate_pem_b64": BASE64_STANDARD.encode(&certificate),
+                    "client_private_key_pem_b64": BASE64_STANDARD.encode(&private_key)
+                }
+            }
+        });
+        tokio::fs::write(&secrets_path, secrets_content.to_string()).await?;
+        let secrets_watcher = Arc::new(SecretFileWatcher::new(&secrets_path).await?);
+        let config = TimeseriesDbSettings {
+            timeseries_db_url: "https://metrics.example.test".to_string(),
+            auth_mode: Some(TimeseriesDbAuthMode::Mtls),
+            disable_auth: false,
+            ..Default::default()
+        };
+
+        let client = TimeseriesDbClient::new_with_secrets(&config, None, Some(secrets_watcher))?;
+
+        assert_eq!(client.auth_mode, TimeseriesDbAuthMode::Mtls);
+        Ok(())
+    }
+
     #[test]
     fn mtls_rejects_a_private_key_for_another_certificate() -> Result<()> {
         let directory = tempfile::tempdir()?;
@@ -1058,6 +1181,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_query_health_tracks_outage_and_recovery() -> Result<()> {
+        let state = Arc::new(MockServerState::new(
+            vec![(StatusCode::OK, get_mock_response())],
+            vec![],
+        ));
+
+        let server_url = start_mock_server(state.clone()).await;
+        let config = TimeseriesDbSettings {
+            authn_url: "".to_string(),
+            timeseries_db_url: server_url,
+            disable_auth: true,
+            env: "stg".to_string(),
+            ignore_env: false,
+            backoff: Some(immediate_retry_test_backoff()),
+            ..Default::default()
+        };
+        let client = TimeseriesDbClient::new(&config, None)?;
+        let start = Utc.timestamp_opt(1748551740, 0).unwrap();
+        let end = Utc.timestamp_opt(1748551800, 0).unwrap();
+
+        client
+            .query_range("test_query", start, end, StdDuration::from_secs(60))
+            .await?;
+        assert!(client.health().await.is_healthy);
+
+        state.set_response_override(StatusCode::SERVICE_UNAVAILABLE, "Service unavailable");
+        let outage_result = client
+            .query_range("test_query", start, end, StdDuration::from_secs(60))
+            .await;
+        assert!(outage_result.is_err());
+        assert!(!client.health().await.is_healthy);
+
+        state.set_response_override(StatusCode::OK, &get_mock_response());
+        client
+            .query_range("test_query", start, end, StdDuration::from_secs(60))
+            .await?;
+        assert!(client.health().await.is_healthy);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_credential_refresh() -> Result<()> {
         let state = Arc::new(MockServerState::new(
             vec![
@@ -1140,6 +1305,7 @@ mod tests {
             .query_range("test_query", start, end, StdDuration::from_secs(60))
             .await?;
         assert_eq!(result.status, "success");
+        assert!(client.health().await.is_healthy);
 
         Ok(())
     }
@@ -1237,6 +1403,7 @@ mod tests {
             .query_range("test_query", start, end, StdDuration::from_secs(60))
             .await;
         assert!(result.is_err());
+        assert!(!client.health().await.is_healthy);
 
         Ok(())
     }
@@ -1308,8 +1475,11 @@ mod tests {
     #[tokio::test]
     async fn test_health_status_on_auth_vs_other_errors() -> Result<()> {
         let auth_error_state = Arc::new(MockServerState::new(
-            vec![(StatusCode::UNAUTHORIZED, "Unauthorized".to_string())],
-            vec!["test_token_0".to_string()],
+            vec![
+                (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()),
+                (StatusCode::OK, get_mock_response()),
+            ],
+            vec!["test_token_0".to_string(), "test_token_1".to_string()],
         ));
 
         let server_url = start_mock_server(auth_error_state).await;
@@ -1338,6 +1508,11 @@ mod tests {
         let health_result = client.health().await;
         assert!(!health_result.is_healthy);
         assert!(health_result.message.unwrap().contains("unhealthy"));
+
+        client
+            .query_range("test_query", start, end, StdDuration::from_secs(60))
+            .await?;
+        assert!(client.health().await.is_healthy);
 
         Ok(())
     }

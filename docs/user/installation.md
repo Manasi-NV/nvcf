@@ -20,7 +20,7 @@ Want to try NVCF locally first? See [Local Development](../local-development) to
 | Local one-click CLI installation | You want the fastest local k3d install and cluster registration path. | [Quickstart](./quickstart.md) |
 | Helmfile installation | You need manual release control, partial recovery, upgrades, or detailed Helmfile operations. | [Helmfile Installation](./helmfile-installation.md) |
 
-The control plane and GPU cluster can be the same Kubernetes cluster or separate clusters when you use Helmfile or the explicit CLI install primitives. The quickstart supports only a single local k3d cluster. For a complete Amazon EKS example of both topologies, see the [CSP End-to-End Example](https://docs.nvidia.com/nvcf/v0.6.0/csp-end-to-end-example).
+The control plane and GPU cluster can be the same Kubernetes cluster or separate clusters when you use Helmfile or the explicit CLI install primitives. The quickstart supports only a single local k3d cluster. For a complete Amazon EKS example of both topologies, see the [CSP End-to-End Example](./csp-end-to-end-example-installation.md).
 
 For remote installs, prepare the Gateway API ingress path and CLI endpoint
 configuration before registering GPU clusters or running post-install CLI
@@ -54,7 +54,7 @@ Every installation path follows the same high-level sequence:
 
 ### Cluster Version
 
-- Supported versions are the latest Kubernetes minor release and the two prior minor releases (N-2). See official Kubernetes docs for current supported [versions](https://kubernetes.io/releases/version-skew-policy/#supported-versions). 
+- Supported versions are the latest Kubernetes minor release and the two prior minor releases (N-2). See official Kubernetes docs for current supported [versions](https://kubernetes.io/releases/version-skew-policy/#supported-versions).
 - Support for dynamic persistent volume provisioning
 
 ### Required Operators and Components

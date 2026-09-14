@@ -37,10 +37,16 @@ func (r *Reconciler) prepareTransportTLSForWorkloads(
 	ms *nvcav1alpha1.MiniService,
 	objs []client.Object,
 ) error {
+	if err := r.cfg.Workload.Validate(); err != nil {
+		return reconcile.TerminalError(err)
+	}
 	if r.cfg.Workload.TransportTLS == nil {
 		return nil
 	}
 	cfg := transporttls.NormalizeConfig(*r.cfg.Workload.TransportTLS)
+	if err := transporttls.ValidateConfig(cfg); err != nil {
+		return reconcile.TerminalError(err)
+	}
 	if cfg.TrustMode != transporttls.TrustModeBundle {
 		return nil
 	}
@@ -57,9 +63,6 @@ func (r *Reconciler) prepareTransportTLSForWorkloads(
 		return nil
 	}
 
-	if err := transporttls.ValidateConfig(cfg); err != nil {
-		return reconcile.TerminalError(err)
-	}
 	if err := r.ensureTransportTLSConfigMap(ctx, ms, cfg); err != nil {
 		return err
 	}
@@ -151,7 +154,7 @@ func shouldOwnTransportTLSConfigMap(ms *nvcav1alpha1.MiniService) bool {
 func transportTLSOwnerReference(ms *nvcav1alpha1.MiniService) metav1.OwnerReference {
 	return metav1.OwnerReference{
 		APIVersion: nvcav1alpha1.SchemeGroupVersion.String(),
-		Kind:       "MiniService",
+		Kind:       miniServiceKind,
 		Name:       ms.Name,
 		UID:        ms.UID,
 	}
@@ -215,7 +218,7 @@ func matchesOwnerReference(ref metav1.OwnerReference, ms *nvcav1alpha1.MiniServi
 
 func isMiniServiceOwnerReference(ref metav1.OwnerReference) bool {
 	return ref.APIVersion == nvcav1alpha1.SchemeGroupVersion.String() &&
-		ref.Kind == "MiniService"
+		ref.Kind == miniServiceKind
 }
 
 func ownerReferencesEqual(a, b metav1.OwnerReference) bool {

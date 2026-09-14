@@ -24,9 +24,11 @@ surfaced, each with evidence:
    `StatefulSet.apps "cassandra" is invalid: spec: Forbidden: updates to
    statefulset spec for fields other than 'replicas', 'ordinals', 'template',
    'updateStrategy', 'persistentVolumeClaimRetentionPolicy' and
-   'minReadySeconds' are forbidden`. The volumeClaimTemplate and serviceName
-   differ, and those fields are immutable. The StatefulSet must be recreated,
-   not updated in place.
+   'minReadySeconds' are forbidden`. The new chart intentionally removes the
+   existing `app.kubernetes.io/name` and `app.kubernetes.io/instance` labels
+   from `volumeClaimTemplates.metadata.labels`. Kubernetes treats the entire
+   volume claim template as immutable, so the StatefulSet must be recreated
+   instead of updated in place.
 
 2. Data-layout nesting. Bitnami stored data nested under the mount:
    `<pvc>/data/{data,commitlog,hints,saved_caches}` with
@@ -58,13 +60,11 @@ fields you may change on an existing StatefulSet are `replicas`, `ordinals`,
 `minReadySeconds`. Everything else is immutable, including `selector`,
 `serviceName`, `podManagementPolicy`, and `volumeClaimTemplates`.
 
-The old and new StatefulSets share the name `cassandra` but differ in several of
-those frozen fields:
-- `serviceName`: the Bitnami headless service name vs the in-house
-  `cassandra-headless`.
-- `selector.matchLabels`: the Bitnami labels vs the in-house
-  `cassandra.selectorLabels`.
-- `volumeClaimTemplates`: name, size, storageClass, and labels differ.
+The old and new StatefulSets share the name, selector, service name,
+`podManagementPolicy`, and the `volumeClaimTemplates.spec` fields. The only
+immutable-field difference is in `volumeClaimTemplates.metadata.labels`. The
+new chart intentionally removes the existing `app.kubernetes.io/name` and
+`app.kubernetes.io/instance` labels.
 
 So `helm upgrade` applies the new chart onto the existing `cassandra`
 StatefulSet, and the API server rejects it with the Forbidden error above. You
@@ -96,6 +96,7 @@ re-adopted, and the new pod comes up on the old data. In the Phase 4 test the
 PVC stayed `Bound` throughout and the new UID-999 pod mounted and read it.
 
 Two caveats:
+
 - This is a one-time migration hop (Bitnami-shaped StatefulSet to
   in-house-shaped StatefulSet). Ordinary upgrades within the in-house chart
   later do not hit this, because the StatefulSet spec shape stays stable, unless
@@ -110,6 +111,7 @@ Two caveats:
 ### Option A: in-place adopt (legacy layout + config compat)
 
 Reuse the existing PVC in place. Mechanics:
+
 - Recreate the StatefulSet: `kubectl delete statefulset cassandra
   --cascade=orphan` (keeps the pod and PVC), delete the old pod (the PVC
   persists), then `helm upgrade` so the new StatefulSet adopts
@@ -122,7 +124,6 @@ Reuse the existing PVC in place. Mechanics:
   data requires, at least `uuid_sstable_identifiers_enabled: true`, via the
   existing conf initContainer patch. The full set of settings that must match
   is not yet enumerated.
-
 
 The orphan-delete-and-recreate runbook is scripted with safety checks at
 `upgrade/migrate-from-bitnami.sh` (dry-run by default). It is provisional until
@@ -160,6 +161,7 @@ cutover; more operator steps; larger data means longer restore.
 ## Recommendation for discussion
 
 Given we are pre-1.0.0 and want a clean result:
+
 - Ship Option A as the convenience path for environments that want in-place
   adoption, but only after the full cassandra.yaml config-compat set is
   enumerated and encoded, and with the orphan-delete-and-recreate documented as
@@ -169,6 +171,7 @@ Given we are pre-1.0.0 and want a clean result:
   acceptable.
 
 Open questions for Brad:
+
 - Do we commit to supporting in-place adoption (A), or make backup/restore (C)
   the only supported migration and keep the chart clean of legacy-layout knobs?
 - If A, what is the complete set of cassandra.yaml settings the current Bitnami

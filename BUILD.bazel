@@ -20,19 +20,23 @@ exports_files(
     visibility = ["//src/libraries/go/lib:__pkg__"],
 )
 
-# Root module identity + third-party lock + NOTICE index, consumed by the
-# Java subtrees' NOTICE generation/verification tooling now that their Maven
-# closure is owned by the single root module.
+package_group(
+    name = "java_notice_consumers",
+    packages = [
+        "//src/control-plane-services/...",
+        "//src/libraries/java/...",
+    ],
+)
+
+# Root module identity, third-party lock, and NOTICE index consumed by Java
+# NOTICE generation and verification under the stable Java component paths.
 exports_files(
     [
         "MODULE.bazel",
         "NOTICE",
         "maven_install.json",
     ],
-    visibility = [
-        "//src/control-plane-services/cloud-tasks:__subpackages__",
-        "//src/libraries/java/nv-boot-parent:__subpackages__",
-    ],
+    visibility = [":java_notice_consumers"],
 )
 
 # Gazelle manages only the native Go subtrees listed in go.work.bazel.
@@ -62,7 +66,17 @@ exports_files(
 # gazelle:exclude migrations
 # gazelle:exclude platforms
 # gazelle:exclude rules
-# gazelle:exclude src/compute-plane-services
+# src/compute-plane-services is excluded per-subtree rather than wholesale:
+# nvsnap is part of the root module and Gazelle must manage its BUILD files.
+# gazelle:exclude src/compute-plane-services/byoo-otel-collector
+# gazelle:exclude src/compute-plane-services/ess-agent
+# gazelle:exclude src/compute-plane-services/image-credential-helper
+# gazelle:exclude src/compute-plane-services/nvca
+# gazelle:exclude src/compute-plane-services/nvcf-unbound
+# gazelle:exclude src/compute-plane-services/worker-init
+# gazelle:exclude src/compute-plane-services/worker-llm-credentials
+# gazelle:exclude src/compute-plane-services/worker-task
+# gazelle:exclude src/compute-plane-services/worker-utils
 # gazelle:exclude src/control-plane-services
 # gazelle:exclude src/invocation-plane-services
 # gazelle:exclude src/libraries/python
