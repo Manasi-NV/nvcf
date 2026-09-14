@@ -1839,7 +1839,7 @@ addons:
 `)
 }
 
-// seedUpstreamImageStackInputs writes the two stack files the focused
+// seedUpstreamImageStackInputs writes the minimal stack files the focused
 // upstream-image feature copies and edits in its wiring test.
 func seedUpstreamImageStackInputs(t *testing.T, repoRoot string) {
 	t.Helper()
@@ -1861,14 +1861,7 @@ func seedUpstreamImageStackInputs(t *testing.T, repoRoot string) {
 	if err := os.WriteFile(filepath.Join(stackDir, "Makefile.dist"), []byte("template:\n\t@true\ninstall:\n\t@true\n"), 0o644); err != nil {
 		t.Fatalf("write Makefile.dist: %v", err)
 	}
-	global := `api:
-  accountBootstrap:
-    image:
-      registry: {{ .Values.global.image.registry }}
-      repository: {{ .Values.global.image.repository }}/alpine-k8s
-      tag: 1.37.0
-      pullPolicy: IfNotPresent
-`
+	global := "{}\n"
 	if err := os.WriteFile(filepath.Join(stackDir, "global.yaml.gotmpl"), []byte(global), 0o644); err != nil {
 		t.Fatalf("write global template: %v", err)
 	}
@@ -1883,7 +1876,7 @@ func seedUpstreamImageRenderOutput(t *testing.T, repoRoot string) {
 image: docker.io/natsio/nats-server-config-reloader:fixture-tag
 `,
 		"02-cassandra/templates/cassandra.yaml": "image: nvcf-cassandra-migrations:latest\n",
-		"03-api/templates/api.yaml":             "image: docker.io/alpine/k8s:1.37.0\n",
+		"03-api/templates/api.yaml":             "image: docker.io/alpine/k8s:fixture-tag\n",
 	}
 	root := filepath.Join(repoRoot, "deploy", "stacks", "self-managed", "out")
 	for relativePath, body := range manifests {
