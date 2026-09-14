@@ -98,6 +98,7 @@ version_overrides:
     source: independent source release; not pinned by stack
 publication_pending:
   - admin-token-issuer-proxy
+  - cert-manager-acmesolver
   - crd-upgrader
   - dynamo-platform
   - ess-agent
@@ -360,6 +361,12 @@ manifest:
       requirement: required
       description: Provides Kubernetes command-line utilities for deployment jobs.
       github_url: https://github.com/alpine-docker/k8s
+    - artifact_id: cert-manager-acmesolver
+      plane: control
+      kind: service-image
+      requirement: optional
+      description: Serves temporary ACME HTTP-01 domain-validation challenges.
+      upstream_url: https://github.com/cert-manager/cert-manager
     - artifact_id: cert-manager-cainjector
       plane: control
       kind: service-image
@@ -761,6 +768,25 @@ manifest:
       kind: resource
       description: Manages functions, deployments, and clusters from the command line.
       github_url: https://github.com/NVIDIA/nvcf/tree/main/src/clis/nvcf-cli
+release_set:
+  documentation_version: dev
+  status: development
+  stacks:
+    control-plane:
+      version: 0.16.1
+      source_tag: deploy/stacks/self-managed/v0.16.1
+      source_commit: 6aa572575c3f3ee7716a9fddc4cbfceae17e73ec
+      inventory_asset: nvcf-self-managed-stack-inventory.json
+    compute-plane:
+      version: 0.3.1
+      source_tag: deploy/stacks/nvcf-compute-plane/v0.3.1
+      source_commit: 9694ba0c27a160e91a9be8a493a0c54cfb81825a
+      inventory_asset: nvcf-compute-plane-stack-inventory.json
+    observability:
+      version: 0.1.1
+      source_tag: deploy/stacks/observability/v0.1.1
+      source_commit: c9ca3b27124a60b99aba42ca3a81d10ce79a3924
+      inventory_asset: nvcf-observability-stack-inventory.json
 stack:
   name: nvcf-self-managed-stack
   version: 0.16.1
@@ -768,11 +794,9 @@ stack:
   source_tag: deploy/stacks/self-managed/v0.16.1
   source_commit: 6aa572575c3f3ee7716a9fddc4cbfceae17e73ec
   pin_sources:
-    - deploy/stacks/nvcf-compute-plane/environments/base.yaml
-    - deploy/stacks/nvcf-compute-plane/helmfile.d/02-nvca.yaml.gotmpl
     - deploy/stacks/self-managed/global.yaml.gotmpl
     - deploy/stacks/self-managed/helmfile.d/02-core.yaml.gotmpl
-  pin_source_digest: sha256:9080c81090e00803c9920b4bbc3fe4015ea4efc7804f9a597d661f55f03ec118
+  pin_source_digest: sha256:9246f885bc9f52a512844da5d6fcbb9d5d32099c8a4cb6f063c4cc145cf058ff
 denylist:
   - name: strap
     reason: Legacy name replaced by nvcf-service-oss
@@ -864,6 +888,10 @@ artifacts:
     type: image
     registry: public-images
     version: 5.0.8-nv-2.0.1
+  - name: cert-manager-acmesolver
+    type: image
+    registry: public-images
+    version: v1.20.2
   - name: cert-manager-cainjector
     type: image
     registry: public-images
@@ -1153,11 +1181,11 @@ supplemental_artifacts:
   - name: nvcf-compute-plane-stack
     type: resource
     registry: public-resources
-    version: 0.16.1
+    version: 0.3.1
   - name: nvcf-observability-stack
     type: resource
     registry: public-resources
-    version: 0.16.1
+    version: 0.1.1
   - name: nvcf-observability-reference-stack
     type: chart
     registry: public-helm
