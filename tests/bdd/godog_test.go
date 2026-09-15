@@ -195,8 +195,8 @@ func writeMulticlusterComputeRegisterValues(t *testing.T, repoRoot, stackDir, cl
 clusterID: 99999999-aaaa-bbbb-cccc-dddddddddddd
 clusterGroupID: cccc-dddd-eeee-ffff
 ncaID: nvcf-default
-region: us-west-1
 selfManaged:
+  region: us-west-1
   identitySource: psat
   icmsServiceURL: http://sis.localhost:8080
   revalServiceURL: http://reval.localhost:8080
@@ -219,8 +219,8 @@ func writeSingleClusterComputeRegisterValues(t *testing.T, repoRoot string) {
 clusterID: 11111111-2222-3333-4444-555555555555
 clusterGroupID: aaaa-bbbb-cccc-dddd
 ncaID: nvcf-default
-region: us-west-1
 selfManaged:
+  region: us-west-1
   identitySource: psat
   icmsServiceURL: http://api.sis.svc.cluster.local:8080
   revalServiceURL: http://reval.nvcf.svc.cluster.local:8080
@@ -240,8 +240,8 @@ func writeHelmfileRegisterValues(t *testing.T, repoRoot string) {
 clusterID: 11111111-2222-3333-4444-555555555555
 clusterGroupID: aaaa-bbbb-cccc-dddd
 ncaID: nvcf-default
-region: us-west-1
 selfManaged:
+  region: us-west-1
   identitySource: psat
   icmsServiceURL: http://api.sis.svc.cluster.local:8080
   revalServiceURL: http://reval.nvcf.svc.cluster.local:8080
@@ -678,7 +678,7 @@ func TestSingleClusterHelmfileLLMPKIFeatureFileWiresToSteps(t *testing.T) {
 		},
 		"helm get values nvca-operator --namespace nvca-operator --kube-context k3d-ncp-local -o yaml": {
 			ExitCode: 0,
-			Stdout:   "agentConfig:\n  mergeConfig: |\n    workload:\n      stargateQUICInsecure: false\n      transportTLS:\n        trustMode: bundle\n        trustBundleFingerprint: sha256:test\n",
+			Stdout:   "agentConfig:\n  mergeConfig: |\n    workload:\n      transportTLS:\n        trustMode: bundle\n        trustBundleFingerprint: sha256:test\n",
 		},
 		"/usr/bin/nvcf-cli --config /repo-root-placeholder/tests/bdd/fixtures/nvcf-cli-local.yaml function invoke" +
 			" --inference-url /v1/chat/completions --model-name openai-compatible-sample" +
@@ -1291,11 +1291,9 @@ func TestMultiClusterHelmfileFeatureFileWiresToSteps(t *testing.T) {
 		"chartPath: ../../../helm/gateway-routes/chart",
 		"chartPath: ../../../helm/llm-request-router/llm-request-router",
 		"llmRequestRouterAddress: https://llm-request-router.nvcf.svc.cluster.local:50071",
-		"secretName: llm-request-router-grpc-tls",
 		"grpcWorker:",
 		"llmWorker:",
 		"enabled: true",
-		"listenerName: worker-tcp",
 	)
 	seedStackSecretsTemplate(t, suite.Config.RepoRoot)
 	writeMulticlusterProfileHandoffArtifact(t, suite.Config.RepoRoot)
@@ -1331,15 +1329,12 @@ func TestMultiClusterHelmfileFeatureFileWiresToSteps(t *testing.T) {
 		{key: "addons.llm.requestRouter.grpcTls.enabled", want: "true"},
 		{key: "addons.llm.requestRouter.grpcTls.mode", want: "certManager"},
 		{key: "addons.llm.requestRouter.grpcTls.secretName", want: "llm-request-router-grpc-tls"},
-		{key: "addons.llm.requestRouter.grpcTls.dnsNames[0]", want: "llm-request-router.nvcf.svc.cluster.local"},
 		{key: "addons.llm.pki.allowedDomains", want: "cluster.local"},
 		{key: "addons.llm.pki.dnsNames[0]", want: "llm-request-router.nvcf.svc.cluster.local"},
 		{key: "addons.llm.pki.dnsNames[1]", want: "*.llm-request-router-headless.nvcf.svc.cluster.local"},
 		{key: "ingress.gatewayApi.chartPath", want: "../../../helm/gateway-routes/chart"},
 		{key: "ingress.gatewayApi.routes.llmWorker.enabled", want: "true"},
 		{key: "ingress.gatewayApi.routes.llmWorker.backend.namespace", want: "nvcf"},
-		{key: "ingress.gatewayApi.gateways.llmGrpc.listenerName", want: "llm-grpc"},
-		{key: "ingress.gatewayApi.gateways.llmQuic.listenerName", want: "llm-quic"},
 	} {
 		got, found, err := dsl.ReadYAMLKey(environmentPath, assertion.key)
 		if err != nil {
@@ -1347,6 +1342,19 @@ func TestMultiClusterHelmfileFeatureFileWiresToSteps(t *testing.T) {
 		}
 		if !found || got != assertion.want {
 			t.Fatalf("multi-cluster override %s = %q, found = %t; want %q", assertion.key, got, found, assertion.want)
+		}
+	}
+	for _, key := range []string{
+		"addons.llm.requestRouter.grpcTls.dnsNames",
+		"ingress.gatewayApi.gateways.nats.listenerName",
+		"ingress.gatewayApi.gateways.llmGrpc.listenerName",
+		"ingress.gatewayApi.gateways.llmQuic.listenerName",
+		"ingress.gatewayApi.routes.grpcWorker.listenerName",
+	} {
+		if got, found, err := dsl.ReadYAMLKey(environmentPath, key); err != nil {
+			t.Fatalf("read multi-cluster default-owned key %s: %v", key, err)
+		} else if found {
+			t.Fatalf("multi-cluster override %s = %q; want key omitted", key, got)
 		}
 	}
 	if !commandRanThatContains(suite.Runner.(*fakeRunner).runs, "deploy/stacks/nvcf-compute-plane install") {
@@ -1584,7 +1592,7 @@ func TestMultiClusterHelmfileLLMRegistrationTLSFeatureFileWiresToSteps(t *testin
 	t.Setenv("REPO_ROOT", "/repo-root-placeholder")
 
 	const (
-		tlsHandshakeCommand     = `/bin/bash -c 'openssl s_client -connect 127.0.0.1:50071 ` +
+		tlsHandshakeCommand = `/bin/bash -c 'openssl s_client -connect 127.0.0.1:50071 ` +
 			`-servername llm-request-router.nvcf.svc.cluster.local -alpn h2 -verify_return_error ` +
 			`-CAfile <(kubectl --context k3d-ncp-local-cp get secret stargate-quic-tls -n nvcf ` +
 			`-o jsonpath="{.data.ca\.crt}" | base64 -d) </dev/null 2>&1'`
@@ -1985,7 +1993,7 @@ env:
     value: "true"
   - name: NVCF_SERVICE_PKI_ALLOWED_DOMAINS
     value: "nvcf.svc.cluster.local"
-image: nvcr.io/test-org/test-team/nvcf-openbao-migrations:0.19.1
+image: nvcr.io/test-org/test-team/nvcf-openbao-migrations:fixture-tag
 `
 	filePath := filepath.Join(repoRoot, "deploy", "stacks", "self-managed", "out", "01-pki", "templates", "pki.yaml")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
@@ -2025,8 +2033,6 @@ addons:
         enabled: true
         mode: certManager
         secretName: llm-request-router-grpc-tls
-        dnsNames:
-          - llm-request-router.nvcf.svc.cluster.local
       backendRouter:
         pylonGrpcDialAddress: https://llm-request-router.nvcf.svc.cluster.local:50071
         pylonReverseTunnelDialAddress: llm-request-router.nvcf.svc.cluster.local:50072
@@ -2041,15 +2047,9 @@ grpcproxy:
 ingress:
   gatewayApi:
     chartPath: ../../../helm/gateway-routes/chart
-    gateways:
-      llmGrpc:
-        listenerName: llm-grpc
-      llmQuic:
-        listenerName: llm-quic
     routes:
       grpcWorker:
         enabled: true
-        listenerName: worker-tcp
       llmWorker:
         enabled: true
         backend:
@@ -2060,8 +2060,6 @@ ingress:
 func seedComputePlaneLocalBDDFixture(t *testing.T, repoRoot string) {
 	t.Helper()
 	writeFixture(t, repoRoot, "nvcf-compute-plane-local-bdd.yaml", `global:
-  nodeSelectors:
-    enabled: false
   nvcaOperator:
     selfManaged:
       icmsServiceURL: http://api.sis.svc.cluster.local:8080
@@ -2069,21 +2067,12 @@ func seedComputePlaneLocalBDDFixture(t *testing.T, repoRoot string) {
       natsURL: nats://nats.nats-system.svc.cluster.local:4222
 observability:
   profile: disabled
-agentConfig:
-  mergeConfig: |
-    cluster:
-      validationPolicy:
-        name: Unrestricted
-    workload:
-      stargateQUICInsecure: false
 `)
 }
 
 func seedComputePlaneLocalBDDMultiFixture(t *testing.T, repoRoot string) {
 	t.Helper()
 	writeFixture(t, repoRoot, "nvcf-compute-plane-local-bdd-multi.yaml", `global:
-  nodeSelectors:
-    enabled: false
   nvcaOperator:
     selfManaged:
       icmsServiceURL: http://api.sis.svc.cluster.local:8080
@@ -2091,13 +2080,6 @@ func seedComputePlaneLocalBDDMultiFixture(t *testing.T, repoRoot string) {
       natsURL: nats://nats.nats-system.svc.cluster.local:4222
 observability:
   profile: disabled
-agentConfig:
-  mergeConfig: |
-    cluster:
-      validationPolicy:
-        name: Unrestricted
-    workload:
-      stargateQUICInsecure: false
 `)
 }
 
@@ -2166,8 +2148,8 @@ func writeEKSRegisterValues(t *testing.T, repoRoot, clusterName, region string) 
 	body := `clusterID: 11111111-2222-3333-4444-555555555555
 clusterGroupID: aaaa-bbbb-cccc-dddd
 ncaID: nvcf-default
-region: ` + region + `
 selfManaged:
+  region: ` + region + `
   identitySource: psat
   icmsServiceURL: http://wiring-elb.example.invalid
   revalServiceURL: http://wiring-elb.example.invalid
