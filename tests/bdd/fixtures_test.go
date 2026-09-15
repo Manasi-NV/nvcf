@@ -59,6 +59,40 @@ func TestSelfManagedOpenBaoWebhookDefaultsToIgnore(t *testing.T) {
 	}
 }
 
+func TestEKSFeaturesReadAuthoritativeEnvoyGatewayVersion(t *testing.T) {
+	command := exec.Command("bash", "scripts/read-envoy-gateway-version.sh")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("read authoritative Envoy Gateway version: %v: %s", err, output)
+	}
+	version := strings.TrimSpace(string(output))
+	if !regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$`).MatchString(version) {
+		t.Fatalf("authoritative Envoy Gateway version %q is invalid", version)
+	}
+
+	for _, featurePath := range []string{
+		"features/single-cluster-eks-helmfile.feature",
+		"features/multi-cluster-eks-helmfile.feature",
+	} {
+		featureBytes, readErr := os.ReadFile(featurePath)
+		if readErr != nil {
+			t.Fatalf("read %s: %v", featurePath, readErr)
+		}
+		feature := string(featureBytes)
+		if regexp.MustCompile(`--version v[0-9]+\.[0-9]+\.[0-9]+`).MatchString(feature) {
+			t.Fatalf("%s duplicates a released Envoy Gateway version", featurePath)
+		}
+		for _, required := range []string{
+			"tests/bdd/scripts/read-envoy-gateway-version.sh",
+			"--version ${ENVOY_GATEWAY_VERSION}",
+		} {
+			if !strings.Contains(feature, required) {
+				t.Fatalf("%s missing authoritative version wiring %q", featurePath, required)
+			}
+		}
+	}
+}
+
 func TestSelfManagedOpenBaoUIAppendRequiresCompatibleNamespaceExpression(t *testing.T) {
 	const templatePath = "../../deploy/stacks/self-managed/global.yaml.gotmpl"
 
@@ -150,12 +184,10 @@ func TestNVCFCLILocalFixtureTargetsLocalGRPCGateway(t *testing.T) {
 	}
 }
 
-func TestComputePlaneLocalBDDFixturesDisableResourceSizingFeatureGates(t *testing.T) {
+func TestComputePlaneLocalBDDFixturesUseDefaultHelmResourceEnforcement(t *testing.T) {
 	want := []string{
 		"-InfraResourceOverhead",
-		"-EnforceHelmFunctionResourceLimits",
 		"-EnforceContainerFunctionResourceLimits",
-		"-EnforceHelmTaskResourceLimits",
 		"-EnforceContainerTaskResourceLimits",
 	}
 
@@ -182,6 +214,12 @@ func TestComputePlaneLocalBDDFixturesDisableResourceSizingFeatureGates(t *testin
 			}
 
 			got := fixture.Global.NVCAOperator.SelfManaged.FeatureGateValues
+			if slices.Contains(got, "-EnforceHelmFunctionResourceLimits") {
+				t.Fatal("local BDD fixture must not disable default Helm function resource enforcement")
+			}
+			if slices.Contains(got, "-EnforceHelmTaskResourceLimits") {
+				t.Fatal("local BDD fixture must not disable default Helm task resource enforcement")
+			}
 			if !slices.Equal(got, want) {
 				t.Fatalf("featureGateValues = %q, want %q", got, want)
 			}
@@ -418,11 +456,14 @@ func nestedYAMLValue(values map[string]any, path ...string) (any, bool) {
 	return current, true
 }
 
-func TestNVCTTaskSmokeUsesTaskSimpleSample(t *testing.T) {
+func TestNVCTTaskSmokeSupportsContainerAndHelmSamples(t *testing.T) {
 	for _, path := range []string{
 		"../../examples/task-samples/task-simple-sample/Dockerfile",
 		"../../examples/task-samples/task-simple-sample/main.py",
 		"../../examples/task-samples/task-simple-sample/requirements.txt",
+		"../../examples/task-samples/task-helmchart-sample/task-helmchart-test/Chart.yaml",
+		"../../examples/task-samples/task-helmchart-sample/task-helmchart-test/templates/job.yaml",
+		"../../examples/task-samples/task-helmchart-sample/task-helmchart-test/values.yaml",
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("task-simple-sample fixture missing %s: %v", path, err)
@@ -437,6 +478,9 @@ func TestNVCTTaskSmokeUsesTaskSimpleSample(t *testing.T) {
 	for _, want := range []string{
 		"task-simple-sample",
 		"NVCT_BDD_TASK_IMAGE_TAG:-local",
+		"NVCT_BDD_TASK_MODE",
+		"NVCT_BDD_TASK_HELM_CHART must be set in helm mode",
+		"helmChart",
 		"containerEnvironment",
 		"NUM_OF_RESULTS",
 		"DELAY_BETWEEN_RESULTS_IN_MINUTES",
