@@ -55,7 +55,7 @@ sample script sends a wav file and prints interim and final transcripts.
     $ git clone --depth 1 https://github.com/nvidia-riva/python-clients /tmp/python-clients
     ```
 
-1. Provide a 16 kHz mono wav file as the input. For example:
+1. Provide a wav file as the input. For example:
     ```console
     $ export INPUT_FILE=/path/to/your/audio.wav
     ```
@@ -76,14 +76,12 @@ sample script sends a wav file and prints interim and final transcripts.
     ```console
     $ python /tmp/python-clients/scripts/asr/transcribe_file.py \
         --server "${GATEWAY_ADDR}:10081" \
-        --input-file /tmp/en-US_sample.wav \
+        --input-file "${INPUT_FILE}" \
         --language-code en-US \
         --show-intermediate \
         --metadata authorization "Bearer ${NVCF_API_KEY}" \
         --metadata function-id "<function-id>" \
         --metadata function-version-id "<version-id>"
-    ## what is
-    ##  natural language processing
     ```
 
 The script opens a gRPC bidirectional stream (`StreamingRecognize`) to
