@@ -25,7 +25,7 @@ sample script sends a wav file and prints interim and final transcripts.
 1. Create the function:
 
     ```console
-    $ nvcf-cli function create --input-file function-create.json
+    nvcf-cli function create --input-file function-create.json
     ```
 
     Save the function ID and version ID from the output.
@@ -33,7 +33,7 @@ sample script sends a wav file and prints interim and final transcripts.
 1. Deploy the function:
 
     ```console
-    $ nvcf-cli function deploy create <function-id> \
+    nvcf-cli function deploy create <function-id> \
         --input-file function-deploy.json
     ```
 
@@ -41,7 +41,7 @@ sample script sends a wav file and prints interim and final transcripts.
    profile on first boot, which can take several minutes:
 
     ```console
-    $ nvcf-cli function show <function-id>
+    nvcf-cli function show <function-id>
     ```
 
 ## Invoking the function
@@ -49,24 +49,25 @@ sample script sends a wav file and prints interim and final transcripts.
 1. Install the Riva Python client and clone the sample scripts:
 
     ```console
-    $ python3 -m venv .venv
-    $ . .venv/bin/activate
-    $ pip install nvidia-riva-client
-    $ git clone --depth 1 https://github.com/nvidia-riva/python-clients /tmp/python-clients
+    python3 -m venv .venv
+    . .venv/bin/activate
+    pip install nvidia-riva-client
+    git clone --depth 1 https://github.com/nvidia-riva/python-clients /tmp/python-clients
     ```
 
 1. Provide a wav file as the input. For example:
+
     ```console
-    $ export INPUT_FILE=/path/to/your/audio.wav
+    export INPUT_FILE=/path/to/your/audio.wav
     ```
 
 1. Resolve the gRPC gateway and generate an invocation API key via
    `nvcf-cli`:
 
     ```console
-    $ export GATEWAY_ADDR=$(kubectl get gateway nvcf-gateway -n envoy-gateway \
+    export GATEWAY_ADDR=$(kubectl get gateway nvcf-gateway -n envoy-gateway \
         -o jsonpath='{.status.addresses[0].value}')
-    $ export NVCF_API_KEY=$(nvcf-cli api-key generate \
+    export NVCF_API_KEY=$(nvcf-cli api-key generate \
         --description "grpc-asr-client" --json \
         | jq -r '.keys[] | select(.service=="function") | .apiKey')
     ```
@@ -74,7 +75,7 @@ sample script sends a wav file and prints interim and final transcripts.
 1. Transcribe the file through the gateway, routing with gRPC metadata:
 
     ```console
-    $ python /tmp/python-clients/scripts/asr/transcribe_file.py \
+    python /tmp/python-clients/scripts/asr/transcribe_file.py \
         --server "${GATEWAY_ADDR}:10081" \
         --input-file "${INPUT_FILE}" \
         --language-code en-US \
