@@ -55,15 +55,10 @@ sample script sends a wav file and prints interim and final transcripts.
     $ git clone --depth 1 https://github.com/nvidia-riva/python-clients /tmp/python-clients
     ```
 
-1. Get a sample audio file. The NIM image ships a sample clip; copy it
-   out of the running pod:
-
+1. Provide a 16 kHz mono wav file as the input. For example:
     ```console
-    $ kubectl -n <namespace> cp \
-        <asr-pod>:/opt/riva/wav/en-US_sample.wav /tmp/en-US_sample.wav
+    $ export INPUT_FILE=/path/to/your/audio.wav
     ```
-
-    Any 16 kHz mono wav file works.
 
 1. Resolve the gRPC gateway and generate an invocation API key via
    `nvcf-cli`:
