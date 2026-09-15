@@ -29,12 +29,10 @@ Feature: Install a local multi-cluster NVCF stack with Helmfile
         | global.imagePullSecrets[0].name               | nvcr-pull-secret                                                    |
         | global.helm.sources.repository                | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                                |
         | global.image.repository                       | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                                |
-        | observability.profile                          | disabled                                                            |
       And I prepare Helmfile environment "local-bdd" for stack "nvcf-compute-plane" from fixture "tests/bdd/fixtures/nvcf-compute-plane-local-bdd-multi.yaml" with values:
         | global.imagePullSecrets[0].name | nvcr-pull-secret                     |
         | global.helm.sources.repository  | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM} |
         | global.image.repository         | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM} |
-        | observability.profile           | disabled                             |
       And I prepare self-managed secrets file "deploy/stacks/self-managed/secrets/local-bdd-secrets.yaml" from template "deploy/stacks/self-managed/secrets/secrets.yaml.template" using the current NGC registry credential
       # Conflict precheck: single-cluster ncp-local's k3d serverlb
       # claims 0.0.0.0:8080/8443/10081, and ncp-local-cp also
@@ -327,6 +325,44 @@ Feature: Install a local multi-cluster NVCF stack with Helmfile
       Then the command output should contain "bdd-echo"
 
       # Keep the simulated GPU capacity available for the next scenario.
+      And I successfully undeploy the function selected by NVCF CLI
+
+    @function-lifecycle @helm-function
+    Scenario: Operator creates, deploys, and invokes a Helm chart function across clusters
+      Given environment variable "SAMPLE_HELM_FUNCTION_CHART" is set
+      And I use NVCF CLI config "${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml"
+
+      # ReVal renders the chart on the control plane before NVCA deploys the
+      # workload in the separate compute cluster. Successful invocation proves
+      # that the complete chart-backed path works across the cluster boundary.
+      # TODO(#1871): Replace this raw command with a table-backed Helm function
+      # create step so the options remain readable.
+      When I successfully run command:
+        """
+        ${NVCF_CLI} --config ${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml function create --name bdd-multi-helm-function --helm-chart ${SAMPLE_HELM_FUNCTION_CHART} --helm-chart-service entrypoint --inference-url /echo --inference-port 8000 --health-uri /health --health-port 8000 --health-timeout PT30S
+        """
+
+      And I successfully deploy the function selected by NVCF CLI with options:
+        | option          | value               |
+        | --gpu           | H100                |
+        | --instance-type | NCP.GPU.H100_1x     |
+        | --backend       | ncp-local-compute-1 |
+        | --regions       | us-west-1           |
+        | --min-instances | 1                   |
+        | --max-instances | 1                   |
+        | --timeout       | 900                 |
+
+      And I successfully generate a function API key with CLI options:
+        | option        | value                                                               |
+        | --description | bdd-multi-helm-function                                             |
+        | --scopes      | invoke_function,list_functions,queue_details,list_functions_details |
+
+      When I successfully invoke the function selected by NVCF CLI over HTTP with timeout "120" seconds and poll duration "5" seconds:
+        """
+        {"message":"bdd-multi-helm-echo","repeats":1}
+        """
+      Then the command output should contain "bdd-multi-helm-echo"
+
       And I successfully undeploy the function selected by NVCF CLI
 
     @function-lifecycle @grpc

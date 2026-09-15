@@ -22,12 +22,10 @@ Feature: Install a local single-cluster NVCF stack with Helmfile
         | global.imagePullSecrets[0].name               | nvcr-pull-secret                                                   |
         | global.helm.sources.repository                | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                               |
         | global.image.repository                       | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM}                               |
-        | observability.profile                         | disabled                                                           |
       And I prepare Helmfile environment "local-bdd" for stack "nvcf-compute-plane" from fixture "tests/bdd/fixtures/nvcf-compute-plane-local-bdd.yaml" with values:
         | global.imagePullSecrets[0].name | nvcr-pull-secret                     |
         | global.helm.sources.repository  | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM} |
         | global.image.repository         | ${SAMPLE_NGC_ORG}/${SAMPLE_NGC_TEAM} |
-        | observability.profile           | disabled                             |
       And I prepare self-managed secrets file "deploy/stacks/self-managed/secrets/local-bdd-secrets.yaml" from template "deploy/stacks/self-managed/secrets/secrets.yaml.template" using the current NGC registry credential
 
     Scenario: Operator validates the authored Helmfile environment renders
@@ -220,6 +218,43 @@ Feature: Install a local single-cluster NVCF stack with Helmfile
 
       # Remove the deployment: the local sizing cannot hold every
       # scenario's deployment at once.
+      And I successfully undeploy the function selected by NVCF CLI
+
+    @function-lifecycle @helm-function
+    Scenario: Operator creates, deploys, and invokes a Helm chart function
+      Given environment variable "SAMPLE_HELM_FUNCTION_CHART" is set
+      And I use NVCF CLI config "${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml"
+
+      # Function creation and deployment both cross the ReVal chart-rendering
+      # boundary. A deployed ReVal pod alone does not prove this path works.
+      # TODO(#1871): Replace this raw command with a table-backed Helm function
+      # create step so the options remain readable.
+      When I successfully run command:
+        """
+        ${NVCF_CLI} --config ${REPO_ROOT}/tests/bdd/fixtures/nvcf-cli-local.yaml function create --name bdd-helm-function --helm-chart ${SAMPLE_HELM_FUNCTION_CHART} --helm-chart-service entrypoint --inference-url /echo --inference-port 8000 --health-uri /health --health-port 8000 --health-timeout PT30S
+        """
+
+      And I successfully deploy the function selected by NVCF CLI with options:
+        | option          | value               |
+        | --gpu           | H100                |
+        | --instance-type | NCP.GPU.H100_1x     |
+        | --backend       | ncp-local           |
+        | --regions       | us-west-1           |
+        | --min-instances | 1                   |
+        | --max-instances | 1                   |
+        | --timeout       | 900                 |
+
+      And I successfully generate a function API key with CLI options:
+        | option        | value                                                                       |
+        | --description | bdd-helm-function                                                           |
+        | --scopes      | invoke_function,list_functions,queue_details,list_functions_details         |
+
+      When I successfully invoke the function selected by NVCF CLI over HTTP with timeout "120" seconds and poll duration "5" seconds:
+        """
+        {"message":"bdd-helm-echo","repeats":1}
+        """
+      Then the command output should contain "bdd-helm-echo"
+
       And I successfully undeploy the function selected by NVCF CLI
 
     @function-lifecycle @grpc
