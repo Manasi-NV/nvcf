@@ -727,6 +727,40 @@ func TestSyncInlineImageMirroringUsesTraditionalPublicHelmChart(t *testing.T) {
 	}
 }
 
+func TestSyncInlineImageMirroringUsesTraditionalUpstreamHelmChart(t *testing.T) {
+	catalog := testCatalog()
+	catalog.SupplementalArtifacts = append(catalog.SupplementalArtifacts,
+		Artifact{
+			Name: "helm-nvca-operator", Type: ArtifactTypeChart, Registry: defaultChartRegistry,
+			RepositoryName:     "opentelemetry-operator",
+			UpstreamRepository: "https://open-telemetry.github.io/opentelemetry-helm-charts", Version: "1.12.7",
+		},
+	)
+	content := "helm pull --repo https://open-telemetry.github.io/opentelemetry-helm-charts opentelemetry-operator --version 1.12.6\n" +
+		"# This creates: helm-nvca-operator-1.12.6.tgz\n" +
+		"helm push helm-nvca-operator-1.12.6.tgz oci://example.test/repo\n"
+
+	got, changed, err := SyncInlineVersions("docs/user/image-mirroring.md", content, catalog)
+	if err != nil {
+		t.Fatalf("SyncInlineVersions failed: %v", err)
+	}
+	if !changed {
+		t.Fatal("SyncInlineVersions reported no change")
+	}
+	want := "helm pull --repo https://open-telemetry.github.io/opentelemetry-helm-charts opentelemetry-operator --version 1.12.7"
+	if !strings.Contains(got, want) {
+		t.Fatalf("updated content missing %q:\n%s", want, got)
+	}
+
+	gotAgain, changedAgain, err := SyncInlineVersions("docs/user/image-mirroring.md", got, catalog)
+	if err != nil {
+		t.Fatalf("second SyncInlineVersions failed: %v", err)
+	}
+	if changedAgain || gotAgain != got {
+		t.Fatalf("second sync changed content:\n%s", gotAgain)
+	}
+}
+
 func TestSyncDocsCheckModeDetectsDiff(t *testing.T) {
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, "docs/user/manifest.md"), `before
