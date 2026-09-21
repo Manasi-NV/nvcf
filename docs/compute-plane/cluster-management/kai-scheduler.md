@@ -122,6 +122,15 @@ helm install kai-scheduler \
   --version <kai-version> -f values.yaml
 ```
 
+For an existing KAI release, apply the same values with `helm upgrade`:
+
+```bash
+helm upgrade kai-scheduler \
+  oci://ghcr.io/kai-scheduler/kai-scheduler/kai-scheduler \
+  --namespace kai-scheduler \
+  --version <kai-version> -f values.yaml
+```
+
 After KAI is ready, add `KAIScheduler` to the existing NVCA feature-gate list.
 For standalone NVCA Helm values, use `selfManaged.featureGateValues`.
 For compute plane environment values, use
