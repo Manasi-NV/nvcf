@@ -58,6 +58,11 @@ Set unlimited (`-1`) quotas and limits on the queues used for NVCF workloads.
 NVCA relies on this configuration for cluster capacity and usage tracking.
 </Warning>
 
+If NVCF and non-NVCF workloads share a cluster with limited KAI queues,
+enable [Shared Cluster mode](./configuration.md#cluster-features) so NVCA
+excludes non-NVCF nodes from capacity tracking and scheduling. Nodes running
+NVCF workloads must be labeled `nvca.nvcf.nvidia.io/schedule=true`.
+
 Create `values.yaml` with the required scheduler and queue settings:
 
 <Accordion title="values.yaml">
